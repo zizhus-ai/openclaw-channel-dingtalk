@@ -9,6 +9,11 @@ const cardMocks = vi.hoisted(() => ({
     deleteActiveCardByTargetMock: vi.fn(),
 }));
 
+const quoteJournalMocks = vi.hoisted(() => ({
+    appendOutboundToQuoteJournalMock: vi.fn(),
+    appendProactiveOutboundJournalMock: vi.fn(),
+}));
+
 vi.mock('../../src/auth', () => ({
     getAccessToken: vi.fn().mockResolvedValue('token_abc'),
 }));
@@ -27,6 +32,11 @@ vi.mock('../../src/card-service', () => ({
     isCardInTerminalState: cardMocks.isCardInTerminalStateMock,
     streamAICard: cardMocks.streamAICardMock,
     deleteActiveCardByTarget: cardMocks.deleteActiveCardByTargetMock,
+}));
+
+vi.mock('../../src/quote-journal', () => ({
+    appendOutboundToQuoteJournal: quoteJournalMocks.appendOutboundToQuoteJournalMock,
+    appendProactiveOutboundJournal: quoteJournalMocks.appendProactiveOutboundJournalMock,
 }));
 
 import { sendMessage } from '../../src/send-service';
@@ -48,6 +58,8 @@ describe('send-service advanced branches', () => {
         cardMocks.isCardInTerminalStateMock.mockReset();
         cardMocks.streamAICardMock.mockReset();
         cardMocks.deleteActiveCardByTargetMock.mockReset();
+        quoteJournalMocks.appendOutboundToQuoteJournalMock.mockReset();
+        quoteJournalMocks.appendProactiveOutboundJournalMock.mockReset();
     });
 
     it('deletes active card mapping when card is terminal', async () => {
@@ -91,6 +103,71 @@ describe('send-service advanced branches', () => {
                     entry.includes('message=robotCode missing')
             )
         ).toBe(true);
+    });
+
+    it('extracts messageId from legacy msgid field for session webhook send', async () => {
+        mockedAxios.mockResolvedValueOnce({ data: { errcode: 0, errmsg: 'ok', msgid: 'legacy_msg_1' } } as any);
+
+        const result = await sendMessage(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id' } as any,
+            'cidA1B2C3',
+            'text',
+            { sessionWebhook: 'https://session.webhook' } as any,
+        );
+
+        expect(result.ok).toBe(true);
+        expect(result.messageId).toBe('legacy_msg_1');
+    });
+
+    it('delegates session outbound journaling when storePath is provided', async () => {
+        mockedAxios.mockResolvedValueOnce({ data: { errcode: 0, errmsg: 'ok', msgid: 'legacy_msg_2' } } as any);
+
+        await sendMessage(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id' } as any,
+            'cidA1B2C3',
+            'hello session',
+            {
+                sessionWebhook: 'https://session.webhook',
+                accountId: 'main',
+                storePath: '/tmp/sessions.json',
+            } as any,
+        );
+
+        expect(quoteJournalMocks.appendOutboundToQuoteJournalMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                storePath: '/tmp/sessions.json',
+                accountId: 'main',
+                conversationId: 'cidA1B2C3',
+                messageId: 'legacy_msg_2',
+                messageType: 'outbound',
+                text: 'hello session',
+            }),
+        );
+    });
+
+    it('delegates proactive outbound journaling when storePath is provided', async () => {
+        mockedAxios.mockResolvedValueOnce({ data: { processQueryKey: 'proactive_q_1' } } as any);
+
+        await sendMessage(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id' } as any,
+            'cidA1B2C3',
+            'hello proactive',
+            {
+                accountId: 'main',
+                storePath: '/tmp/sessions.json',
+            } as any,
+        );
+
+        expect(quoteJournalMocks.appendProactiveOutboundJournalMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                storePath: '/tmp/sessions.json',
+                accountId: 'main',
+                conversationId: 'cidA1B2C3',
+                messageId: 'proactive_q_1',
+                messageType: 'outbound-proactive',
+                text: 'hello proactive',
+            }),
+        );
     });
 
     it('includes proactive risk context in logs when proactive send fails', async () => {

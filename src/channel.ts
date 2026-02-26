@@ -169,8 +169,9 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
     },
     sendText: async ({ cfg, to, text, accountId, log }: any) => {
       const config = getConfig(cfg, accountId);
+      const storePath = resolveRelativePath(cfg.session?.store || "sessions.json");
       try {
-        const result = await sendMessage(config, to, text, { log, accountId });
+        const result = await sendMessage(config, to, text, { log, accountId, storePath });
         getLogger()?.debug?.(`[DingTalk] sendText: "${text}" result: ${JSON.stringify(result)}`);
         if (result.ok) {
           const data = result.data as any;
@@ -209,6 +210,7 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
       log,
     }: any) => {
       const config = getConfig(cfg, accountId);
+      const storePath = resolveRelativePath(cfg.session?.store || "sessions.json");
       if (!config.clientId) {
         throw new Error("DingTalk not configured");
       }
@@ -242,6 +244,7 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
         const result = await sendProactiveMedia(config, to, actualMediaPath, mediaType, {
           log,
           accountId,
+          storePath,
         });
         getLogger()?.debug?.(
           `[DingTalk] sendMedia: ${mediaType} file=${actualMediaPath} result: ${JSON.stringify(result)}`,

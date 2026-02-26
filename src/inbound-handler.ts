@@ -16,7 +16,11 @@ import { formatGroupMembers, noteGroupMember } from "./group-members-store";
 import { setCurrentLogger } from "./logger-context";
 import { extractMessageContent } from "./message-utils";
 import { registerPeerId } from "./peer-id-registry";
-import { appendQuoteJournalEntry, resolveQuotedMessageById } from "./quote-journal";
+import {
+  appendOutboundToQuoteJournal,
+  appendQuoteJournalEntry,
+  resolveQuotedMessageById,
+} from "./quote-journal";
 import {
   clearProactiveRiskObservationsForTest,
   getProactiveRiskObservationForAny,
@@ -345,6 +349,32 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           ...content,
           text: `[引用消息: "${quoted.text.trim()}"]\n\n${content.text}`,
         };
+      } else {
+        log?.error?.(
+          `[DingTalk] Failed to resolve quoted originalMsgId=${data.originalMsgId} conversationId=${groupId}`,
+        );
+        try {
+          const notifyTarget = isDirect ? senderId : groupId;
+          const notifyResult = await sendMessage(
+            dingtalkConfig,
+            notifyTarget,
+            `⚠️ 引用消息ID无法获取\n\n未能根据消息ID \`${data.originalMsgId}\` 找到可引用原文，可能已过期或不在当前会话上下文中。`,
+            {
+              accountId,
+              atUserId: !isDirect ? senderId : null,
+              log,
+            },
+          );
+          if (!notifyResult.ok) {
+            log?.error?.(
+              `[DingTalk] Failed to notify unresolved quoted originalMsgId=${data.originalMsgId}: ${notifyResult.error || "unknown"}`,
+            );
+          }
+        } catch (notifyErr) {
+          log?.error?.(
+            `[DingTalk] Failed to send unresolved quote notice originalMsgId=${data.originalMsgId}: ${String(notifyErr)}`,
+          );
+        }
       }
     } catch (err) {
       log?.debug?.(`[DingTalk] Quote journal lookup failed: ${String(err)}`);
@@ -491,6 +521,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           atUserId: !isDirect ? senderId : null,
           log,
           accountId,
+          storePath,
         });
       }
     } catch (err: any) {
@@ -548,6 +579,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             atUserId: !isDirect ? senderId : null,
             log,
             accountId,
+            storePath,
           });
         } catch (err: any) {
           log?.error?.(`[DingTalk] Reply failed: ${err.message}`);
@@ -619,12 +651,30 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         }
         const finalContent = finalContentCandidate;
         await finishAICard(currentAICard, finalContent, log);
+        await appendOutboundToQuoteJournal({
+          storePath,
+          accountId,
+          conversationId: groupId,
+          messageId: currentAICard.outboundMessageId || currentAICard.cardInstanceId,
+          messageType: "outbound",
+          text: finalContent,
+          log,
+        });
       } else {
         const defaultFinalContent = "✅ Done";
         log?.debug?.(
           "[DingTalk] No textual content was produced; finalizing AI Card with default completion content.",
         );
         await finishAICard(currentAICard, defaultFinalContent, log);
+        await appendOutboundToQuoteJournal({
+          storePath,
+          accountId,
+          conversationId: groupId,
+          messageId: currentAICard.outboundMessageId || currentAICard.cardInstanceId,
+          messageType: "outbound",
+          text: defaultFinalContent,
+          log,
+        });
       }
     } catch (err: any) {
       log?.debug?.(`[DingTalk] AI Card finalization failed: ${err.message}`);

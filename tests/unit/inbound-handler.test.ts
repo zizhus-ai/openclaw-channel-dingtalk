@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { resolveQuotedMessageById } from '../../src/quote-journal';
 
 const shared = vi.hoisted(() => ({
     sendBySessionMock: vi.fn(),
@@ -655,6 +656,130 @@ describe('inbound-handler', () => {
         expect(String(secondBodyArg)).toContain('[引用消息: "first message"]');
         expect(String(secondFinalizeArg?.RawBody)).toContain('[引用消息: "first message"]');
         expect(String(secondFinalizeArg?.CommandBody)).toContain('[引用消息: "first message"]');
+
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('notifies user and logs error when originalMsgId cannot be resolved', async () => {
+        const runtime = buildRuntime();
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dingtalk-inbound-journal-miss-'));
+        runtime.channel.session.resolveStorePath = vi.fn().mockReturnValue(path.join(tmpDir, 'sessions.json'));
+        shared.getRuntimeMock.mockReturnValue(runtime);
+        const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+        shared.extractMessageContentMock.mockReturnValueOnce({ text: 'follow-up', messageType: 'text' });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: log as any,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+            data: {
+                msgId: 'reply_msg_missing',
+                msgtype: 'text',
+                text: { content: 'follow-up', isReplyMsg: true },
+                originalMsgId: 'not_found_id',
+                conversationType: '1',
+                conversationId: 'cid_quote',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        const noticeCalls = shared.sendMessageMock.mock.calls.filter((call) =>
+            String(call[2]).includes('引用消息ID')
+        );
+        expect(noticeCalls.length).toBe(1);
+        expect(log.error).toHaveBeenCalledWith(expect.stringContaining('Failed to resolve quoted originalMsgId'));
+
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('passes storePath to sendMessage for outbound markdown journaling in send-service', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi.fn().mockImplementation(async ({ dispatcherOptions }) => {
+            await dispatcherOptions.deliver({ text: 'final output' }, { kind: 'final' });
+            return { queuedFinal: 'queued final' };
+        });
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dingtalk-outbound-journal-'));
+        runtime.channel.session.resolveStorePath = vi.fn().mockReturnValue(path.join(tmpDir, 'sessions.json'));
+        shared.getRuntimeMock.mockReturnValue(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({ text: 'hello', messageType: 'text' });
+        shared.sendMessageMock.mockResolvedValueOnce({ ok: true, messageId: 'out_final_1' });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+            data: {
+                msgId: 'm_outbound_1',
+                msgtype: 'text',
+                text: { content: 'hello' },
+                conversationType: '1',
+                conversationId: 'cid_outbound',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        const calls = shared.sendMessageMock.mock.calls;
+        const finalSendCall = calls.find((call) => String(call[2]) === 'final output');
+        expect(finalSendCall?.[3]).toEqual(
+            expect.objectContaining({
+                accountId: 'main',
+                storePath: path.join(tmpDir, 'sessions.json'),
+            })
+        );
+
+        await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('records outbound card final content when card messageId is available', async () => {
+        const runtime = buildRuntime();
+        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dingtalk-card-outbound-journal-'));
+        runtime.channel.session.resolveStorePath = vi.fn().mockReturnValue(path.join(tmpDir, 'sessions.json'));
+        shared.getRuntimeMock.mockReturnValue(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({ text: 'hello', messageType: 'text' });
+        shared.createAICardMock.mockResolvedValueOnce({
+            cardInstanceId: 'card_1',
+            state: '1',
+            lastUpdated: Date.now(),
+            outboundMessageId: 'card_msg_1',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', showThinking: false } as any,
+            data: {
+                msgId: 'm_card_1',
+                msgtype: 'text',
+                text: { content: 'hello' },
+                conversationType: '1',
+                conversationId: 'cid_card',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        const quoted = await resolveQuotedMessageById({
+            storePath: path.join(tmpDir, 'sessions.json'),
+            accountId: 'main',
+            conversationId: 'cid_card',
+            originalMsgId: 'card_msg_1',
+        });
+        expect(quoted?.text).toContain('final output');
 
         await fs.rm(tmpDir, { recursive: true, force: true });
     });

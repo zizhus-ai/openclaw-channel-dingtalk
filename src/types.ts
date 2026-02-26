@@ -214,6 +214,7 @@ export interface SendMessageOptions {
   mediaUrl?: string;
   mediaType?: "image" | "voice" | "video" | "file";
   accountId?: string;
+  storePath?: string;
 }
 
 /**
@@ -440,6 +441,7 @@ export type AICardState = (typeof AICardStatus)[keyof typeof AICardStatus];
  */
 export interface AICardInstance {
   cardInstanceId: string;
+  outboundMessageId?: string;
   accessToken: string;
   conversationId: string;
   createdAt: number;

@@ -10,6 +10,15 @@ vi.mock('../../src/media-utils', () => ({
     detectMediaTypeFromExtension: vi.fn(),
 }));
 
+const quoteJournalMocks = vi.hoisted(() => ({
+    appendProactiveOutboundJournalMock: vi.fn(),
+}));
+
+vi.mock('../../src/quote-journal', () => ({
+    appendOutboundToQuoteJournal: vi.fn(),
+    appendProactiveOutboundJournal: quoteJournalMocks.appendProactiveOutboundJournalMock,
+}));
+
 vi.mock('axios', () => {
     const mockAxios = vi.fn();
     return {
@@ -28,6 +37,7 @@ describe('send-service media branches', () => {
     beforeEach(() => {
         mockedAxios.mockReset();
         mockedUploadMedia.mockReset();
+        quoteJournalMocks.appendProactiveOutboundJournalMock.mockReset();
     });
 
     it('sendBySession uses native image body when upload succeeds', async () => {
@@ -89,5 +99,28 @@ describe('send-service media branches', () => {
         expect(req.data.msgKey).toBe('sampleAudio');
         expect(JSON.parse(req.data.msgParam)).toEqual({ mediaId: 'media_voice_1', duration: '0' });
         expect(result.ok).toBe(true);
+    });
+
+    it('delegates proactive media journaling when storePath is provided', async () => {
+        mockedUploadMedia.mockResolvedValueOnce('media_voice_2');
+        mockedAxios.mockResolvedValueOnce({ data: { processQueryKey: 'q_voice_2' } } as any);
+
+        await sendProactiveMedia(
+            { clientId: 'id', clientSecret: 'sec', robotCode: 'id' } as any,
+            'user_123',
+            '/tmp/a.amr',
+            'voice',
+            { accountId: 'main', storePath: '/tmp/sessions.json' } as any,
+        );
+
+        expect(quoteJournalMocks.appendProactiveOutboundJournalMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                storePath: '/tmp/sessions.json',
+                accountId: 'main',
+                conversationId: 'user_123',
+                messageId: 'q_voice_2',
+                messageType: 'outbound-proactive-media',
+            }),
+        );
     });
 });

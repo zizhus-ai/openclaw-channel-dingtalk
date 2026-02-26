@@ -32,6 +32,10 @@ describe('dingtalkPlugin.outbound.sendMedia flow', () => {
     });
 
     it('auto-detects mediaType and sends with resolved absolute path', async () => {
+        const sendMedia = dingtalkPlugin.outbound?.sendMedia as any;
+        if (!sendMedia) {
+            throw new Error('dingtalkPlugin.outbound.sendMedia is not defined');
+        }
         detectMediaTypeFromExtensionMock.mockReturnValueOnce('image');
         sendProactiveMediaMock.mockResolvedValueOnce({
             ok: true,
@@ -39,7 +43,7 @@ describe('dingtalkPlugin.outbound.sendMedia flow', () => {
             messageId: 'media_1',
         });
 
-        const result = await dingtalkPlugin.outbound.sendMedia({
+        const result = await sendMedia({
             cfg: { channels: { dingtalk: { clientId: 'id', clientSecret: 'sec' } } },
             to: 'cidA1B2C3',
             mediaPath: './fixtures/photo.png',
@@ -63,13 +67,17 @@ describe('dingtalkPlugin.outbound.sendMedia flow', () => {
     });
 
     it('uses explicit mediaType without auto-detection', async () => {
+        const sendMedia = dingtalkPlugin.outbound?.sendMedia as any;
+        if (!sendMedia) {
+            throw new Error('dingtalkPlugin.outbound.sendMedia is not defined');
+        }
         sendProactiveMediaMock.mockResolvedValueOnce({
             ok: true,
             data: { messageId: 'manual_1' },
             messageId: 'manual_1',
         });
 
-        await dingtalkPlugin.outbound.sendMedia({
+        await sendMedia({
             cfg: { channels: { dingtalk: { clientId: 'id', clientSecret: 'sec' } } },
             to: 'user_123',
             mediaPath: '/tmp/voice.wav',
@@ -88,11 +96,15 @@ describe('dingtalkPlugin.outbound.sendMedia flow', () => {
     });
 
     it('throws when DingTalk send returns known error code', async () => {
+        const sendMedia = dingtalkPlugin.outbound?.sendMedia as any;
+        if (!sendMedia) {
+            throw new Error('dingtalkPlugin.outbound.sendMedia is not defined');
+        }
         detectMediaTypeFromExtensionMock.mockReturnValueOnce('file');
         sendProactiveMediaMock.mockResolvedValueOnce({ ok: false, error: 'DingTalk API error 300001' });
 
         await expect(
-            dingtalkPlugin.outbound.sendMedia({
+            sendMedia({
                 cfg: { channels: { dingtalk: { clientId: 'id', clientSecret: 'sec' } } },
                 to: 'cidA1B2C3',
                 mediaPath: '/tmp/doc.pdf',

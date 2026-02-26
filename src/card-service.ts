@@ -24,6 +24,15 @@ const aiCardInstances = new Map<string, AICardInstance>();
 // accountId:conversationId -> cardInstanceId
 const activeCardsByTarget = new Map<string, string>();
 
+function extractCardOutboundMessageId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const data = payload as Record<string, unknown>;
+  const value = data.processQueryKey ?? data.messageId;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 // Helper to identify card terminal states.
 export function isCardInTerminalState(state: string): boolean {
   return state === AICardStatus.FINISHED || state === AICardStatus.FAILED;
@@ -189,6 +198,7 @@ export async function createAICard(
     // Cache the AI card instance with config reference for token refresh/recovery.
     const aiCardInstance: AICardInstance = {
       cardInstanceId,
+      outboundMessageId: extractCardOutboundMessageId(resp.data),
       accessToken: token,
       conversationId,
       createdAt: Date.now(),

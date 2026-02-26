@@ -42,6 +42,16 @@ export interface CleanupExpiredQuoteJournalEntriesParams {
     nowMs?: number;
 }
 
+export interface AppendOutboundToQuoteJournalParams {
+    storePath: string;
+    accountId: string;
+    conversationId: string;
+    messageId?: string;
+    messageType: string;
+    text: string;
+    log?: { debug?: (msg: string) => void };
+}
+
 function sanitizeSegment(value: string): string {
     return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -111,6 +121,37 @@ export async function appendQuoteJournalEntry(params: AppendQuoteJournalEntryPar
         conversationId: params.conversationId,
         ttlDays,
         nowMs: params.nowMs,
+    });
+}
+
+export async function appendOutboundToQuoteJournal(
+    params: AppendOutboundToQuoteJournalParams,
+): Promise<void> {
+    if (!params.messageId || !params.text.trim()) {
+        return;
+    }
+    try {
+        await appendQuoteJournalEntry({
+            storePath: params.storePath,
+            accountId: params.accountId,
+            conversationId: params.conversationId,
+            msgId: params.messageId,
+            messageType: params.messageType,
+            text: params.text,
+        });
+    } catch (err) {
+        params.log?.debug?.(
+            `[DingTalk] Quote journal append failed for outbound messageId=${params.messageId}: ${String(err)}`,
+        );
+    }
+}
+
+export async function appendProactiveOutboundJournal(
+    params: Omit<AppendOutboundToQuoteJournalParams, "messageType"> & { messageType?: string },
+): Promise<void> {
+    await appendOutboundToQuoteJournal({
+        ...params,
+        messageType: params.messageType || "outbound-proactive",
     });
 }
 
