@@ -26,5 +26,8 @@ credentials.json
 .idea/
 .sisyphus/
 
+# Development plans (not part of published docs)
+docs/plans/
+
 # vscode workspace settings
 *.code-workspace
