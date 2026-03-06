@@ -628,6 +628,7 @@ await dingtalkPlugin.outbound.sendMedia({
 
 - macOS / Linux: `bash scripts/dingtalk-connection-check.sh --config ~/.openclaw/openclaw.json`
 - Windows PowerShell: `pwsh -File scripts/dingtalk-connection-check.ps1 -Config ~/.openclaw/openclaw.json`
+  - 旧版 Windows 可使用：`powershell.exe -File scripts/dingtalk-connection-check.ps1 -Config $env:USERPROFILE\.openclaw\openclaw.json`
 
 完整排障流程见 `docs/connection-troubleshooting.md`。
 
