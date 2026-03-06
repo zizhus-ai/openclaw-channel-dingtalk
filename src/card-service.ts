@@ -575,6 +575,99 @@ export async function finishAICard(
   log?: Logger,
 ): Promise<void> {
   log?.debug?.(`[DingTalk][AICard] Starting finish, final content length=${content.length}`);
-  // Finalize by streaming one last full payload with isFinalize=true.
   await streamAICard(card, content, true, log);
+  if (card.conversationId && content.trim()) {
+    cacheCardContent(card.accountId || "", card.conversationId, content, card.createdAt);
+  }
+}
+
+// ============ Card content cache (for quoted card lookup) ============
+
+const CARD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CARD_CACHE_MAX_PER_CONVERSATION = 20;
+const CARD_CACHE_MAX_CONVERSATIONS = 500;
+const CARD_CACHE_MATCH_WINDOW_MS = 2000;
+
+interface CardContentEntry {
+  content: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+interface CardConversationBucket {
+  entries: CardContentEntry[];
+  lastActiveAt: number;
+}
+
+const cardContentStore = new Map<string, CardConversationBucket>();
+
+export function cacheCardContent(
+  accountId: string,
+  conversationId: string,
+  content: string,
+  createdAt: number,
+): void {
+  const scopedKey = `${accountId}:${conversationId}`;
+  let bucket = cardContentStore.get(scopedKey);
+  if (!bucket) {
+    bucket = { entries: [], lastActiveAt: Date.now() };
+    cardContentStore.set(scopedKey, bucket);
+    if (cardContentStore.size > CARD_CACHE_MAX_CONVERSATIONS) {
+      let oldestKey: string | undefined;
+      let oldestTime = Infinity;
+      for (const [key, b] of cardContentStore) {
+        if (b.lastActiveAt < oldestTime) {
+          oldestTime = b.lastActiveAt;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey) {
+        cardContentStore.delete(oldestKey);
+      }
+    }
+  }
+  bucket.lastActiveAt = Date.now();
+
+  const now = Date.now();
+  bucket.entries = bucket.entries.filter((e) => now < e.expiresAt);
+
+  bucket.entries.push({ content, createdAt, expiresAt: now + CARD_CACHE_TTL_MS });
+
+  if (bucket.entries.length > CARD_CACHE_MAX_PER_CONVERSATION) {
+    bucket.entries.sort((a, b) => a.createdAt - b.createdAt);
+    bucket.entries = bucket.entries.slice(-CARD_CACHE_MAX_PER_CONVERSATION);
+  }
+}
+
+export function findCardContent(
+  accountId: string,
+  conversationId: string,
+  repliedCreatedAt: number,
+): string | null {
+  const scopedKey = `${accountId}:${conversationId}`;
+  const bucket = cardContentStore.get(scopedKey);
+  if (!bucket) {
+    return null;
+  }
+  bucket.lastActiveAt = Date.now();
+
+  let bestContent: string | null = null;
+  let bestDelta = Infinity;
+
+  for (const entry of bucket.entries) {
+    if (Date.now() >= entry.expiresAt) {
+      continue;
+    }
+    const delta = Math.abs(entry.createdAt - repliedCreatedAt);
+    if (delta <= CARD_CACHE_MATCH_WINDOW_MS && delta < bestDelta) {
+      bestDelta = delta;
+      bestContent = entry.content;
+    }
+  }
+
+  return bestContent;
+}
+
+export function clearCardContentCacheForTest(): void {
+  cardContentStore.clear();
 }

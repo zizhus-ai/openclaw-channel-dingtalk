@@ -21,6 +21,9 @@ import { sendBySession, sendMessage } from "./send-service";
 import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
 import { AICardStatus } from "./types";
 import { acquireSessionLock } from "./session-lock";
+import { findCardContent } from "./card-service";
+import { cacheInboundDownloadCode, getCachedDownloadCode } from "./quoted-msg-cache";
+import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
 import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
@@ -368,6 +371,96 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       mediaType = media.mimeType;
     }
   }
+
+  // Cache downloadCode (+ spaceId/fileId) for quoted file lookups (DM + group).
+  if (content.mediaPath && data.msgId) {
+    cacheInboundDownloadCode(
+      accountId, data.conversationId, data.msgId, content.mediaPath, content.messageType, data.createAt,
+      { spaceId: data.content?.spaceId, fileId: data.content?.fileId },
+    );
+  }
+
+  // Try downloading a quoted file from cached downloadCode/spaceId+fileId.
+  const tryDownloadFromCache = async (
+    quotedMsgId: string | undefined,
+  ): Promise<MediaFile | null> => {
+    if (!quotedMsgId) {
+      return null;
+    }
+    const cached = getCachedDownloadCode(accountId, data.conversationId, quotedMsgId);
+    if (!cached) {
+      return null;
+    }
+    let media = await downloadMedia(dingtalkConfig, cached.downloadCode, log);
+    if (!media && cached.spaceId && cached.fileId && data.senderStaffId) {
+      log?.debug?.("[DingTalk] downloadCode expired/failed, falling back to spaceId+fileId");
+      try {
+        const unionId = await getUnionIdByStaffId(dingtalkConfig, data.senderStaffId, log);
+        media = await downloadGroupFile(dingtalkConfig, cached.spaceId, cached.fileId, unionId, log);
+      } catch (err: any) {
+        log?.warn?.(`[DingTalk] spaceId+fileId fallback failed: ${err.message}`);
+      }
+    }
+    return media;
+  };
+
+  // Quoted picture: download via existing downloadMedia.
+  if (!mediaPath && content.quoted?.mediaDownloadCode && dingtalkConfig.robotCode) {
+    const media = await downloadMedia(dingtalkConfig, content.quoted.mediaDownloadCode, log);
+    if (media) {
+      mediaPath = media.path;
+      mediaType = media.mimeType;
+    } else {
+      content.text = content.text.replace(
+        content.quoted.prefix, "[引用了一张图片，但下载失败]\n\n",
+      );
+    }
+  }
+
+  // Quoted file/video/audio (unknownMsgType): cache-first, then group file API fallback.
+  if (!mediaPath && content.quoted?.isQuotedFile) {
+    let fileResolved = false;
+
+    // Step 1: Try msgId-based cache (works for both DM and group if bot saw the original message).
+    const cachedMedia = await tryDownloadFromCache(content.quoted.msgId);
+    if (cachedMedia) {
+      mediaPath = cachedMedia.path;
+      mediaType = cachedMedia.mimeType;
+      fileResolved = true;
+    }
+
+    // Step 2 (group only): Cache miss → fall back to group file API time-based matching.
+    if (!fileResolved && !isDirect) {
+      const file = await resolveQuotedFile(dingtalkConfig, {
+        openConversationId: data.conversationId,
+        senderStaffId: data.senderStaffId,
+        fileCreatedAt: content.quoted.fileCreatedAt,
+      }, log);
+      if (file) {
+        mediaPath = file.path;
+        mediaType = file.mimeType;
+        fileResolved = true;
+      }
+    }
+
+    if (!fileResolved) {
+      const hint = isDirect
+        ? "[引用了一个文件，内容无法自动获取，请直接发送该文件]\n\n"
+        : "[引用了一个文件，但无法获取内容]\n\n";
+      content.text = content.text.replace(content.quoted.prefix, hint);
+    }
+  }
+
+  // Quoted AI card: replace placeholder prefix with cached reply preview or explicit miss hint.
+  if (content.quoted?.isQuotedCard && content.quoted.cardCreatedAt) {
+    const cardContent = findCardContent(accountId, to, content.quoted.cardCreatedAt);
+    if (cardContent) {
+      const preview = cardContent.length > 50 ? cardContent.slice(0, 50) + "..." : cardContent;
+      content.text = content.text.replace(content.quoted.prefix, `[引用机器人回复: "${preview}"]\n\n`);
+    }
+    // Card cache miss: prefix already contains "[引用了机器人的回复]", keep as-is.
+  }
+
   const envelopeOptions = rt.channel.reply.resolveEnvelopeFormatOptions(cfg);
   const previousTimestamp = rt.channel.session.readSessionUpdatedAt({
     storePath,

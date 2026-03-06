@@ -1,4 +1,4 @@
-import type { DingTalkInboundMessage, MessageContent, SendMessageOptions } from "./types";
+import type { DingTalkInboundMessage, MessageContent, QuotedInfo, SendMessageOptions } from "./types";
 
 /**
  * Auto-detect markdown usage and derive message title.
@@ -27,19 +27,51 @@ export function detectMarkdownAndExtractTitle(
 export function extractMessageContent(data: DingTalkInboundMessage): MessageContent {
   const msgtype = data.msgtype || "text";
 
-  // Normalize quote/reply metadata into a readable text prefix so the agent can understand message context.
-  const formatQuotedContent = (): string => {
-    const textField = data.text as any;
+  const formatQuotedContent = (): QuotedInfo | null => {
+    const textField = data.text;
 
     if (textField?.isReplyMsg && textField?.repliedMsg) {
       const repliedMsg = textField.repliedMsg;
-      const content = repliedMsg?.content;
+      const repliedMsgType = repliedMsg.msgType;
+      const content = repliedMsg.content;
 
-      if (content?.text) {
-        const quoteText = content.text.trim();
-        if (quoteText) {
-          return `[引用消息: "${quoteText}"]\n\n`;
-        }
+      if (repliedMsgType === "text" && content?.text?.trim()) {
+        return { prefix: `[引用消息: "${content.text.trim()}"]\n\n` };
+      }
+
+      if (repliedMsgType === "picture" && content?.downloadCode) {
+        return {
+          prefix: "[引用图片]\n\n",
+          mediaDownloadCode: content.downloadCode,
+          mediaType: "image",
+        };
+      }
+
+      if (repliedMsgType === "unknownMsgType") {
+        return {
+          prefix: "[引用文件]\n\n",
+          isQuotedFile: true,
+          fileCreatedAt: repliedMsg.createdAt,
+          msgId: repliedMsg.msgId,
+        };
+      }
+
+      if (repliedMsgType === "interactiveCard") {
+        return {
+          prefix: "[引用了机器人的回复]\n\n",
+          isQuotedCard: true,
+          cardCreatedAt: repliedMsg.createdAt,
+        };
+      }
+
+      // Has msgType but not one we handle — generic fallback.
+      if (repliedMsgType) {
+        return { prefix: "[引用了一条消息]\n\n" };
+      }
+
+      // No msgType — backward compat: extract text or richText from content.
+      if (content?.text?.trim()) {
+        return { prefix: `[引用消息: "${content.text.trim()}"]\n\n` };
       }
 
       if (content?.richText && Array.isArray(content.richText)) {
@@ -53,41 +85,40 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
             textParts.push("[图片]");
           } else if (part.msgType === "at" || part.type === "at") {
             textParts.push(`@${part.content || part.atName || "某人"}`);
-          } else if (part.text) {
-            textParts.push(part.text);
+          } else if (part.content) {
+            textParts.push(part.content);
           }
         }
         const quoteText = textParts.join("").trim();
         if (quoteText) {
-          return `[引用消息: "${quoteText}"]\n\n`;
+          return { prefix: `[引用消息: "${quoteText}"]\n\n` };
         }
       }
     }
 
-    // Some clients only send originalMsgId for rich media reply messages.
     if (textField?.isReplyMsg && !textField?.repliedMsg && data.originalMsgId) {
-      return `[这是一条引用消息，原消息ID: ${data.originalMsgId}]\n\n`;
+      return { prefix: `[这是一条引用消息，原消息ID: ${data.originalMsgId}]\n\n` };
     }
 
     if (data.quoteMessage) {
       const quoteText = data.quoteMessage.text?.content?.trim() || "";
       if (quoteText) {
-        return `[引用消息: "${quoteText}"]\n\n`;
+        return { prefix: `[引用消息: "${quoteText}"]\n\n` };
       }
     }
 
     if (data.content?.quoteContent) {
-      return `[引用消息: "${data.content.quoteContent}"]\n\n`;
+      return { prefix: `[引用消息: "${data.content.quoteContent}"]\n\n` };
     }
 
-    return "";
+    return null;
   };
 
-  const quotedPrefix = formatQuotedContent();
+  const quoted = formatQuotedContent();
+  const quotedPrefix = quoted?.prefix || "";
 
-  // Unified extraction by DingTalk msgtype for downstream routing/agent processing.
   if (msgtype === "text") {
-    return { text: quotedPrefix + (data.text?.content?.trim() || ""), messageType: "text" };
+    return { text: quotedPrefix + (data.text?.content?.trim() || ""), messageType: "text", quoted: quoted ?? undefined };
   }
 
   if (msgtype === "richText") {
@@ -112,6 +143,7 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
       mediaPath: pictureDownloadCode,
       mediaType: pictureDownloadCode ? "image" : undefined,
       messageType: "richText",
+      quoted: quoted ?? undefined,
     };
   }
 
@@ -151,6 +183,5 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
     };
   }
 
-  // Fallback: preserve unknown msgtype as readable marker.
-  return { text: data.text?.content?.trim() || `[${msgtype}消息]`, messageType: msgtype };
+  return { text: data.text?.content?.trim() || `[${msgtype}消息]`, messageType: msgtype, quoted: quoted ?? undefined };
 }
