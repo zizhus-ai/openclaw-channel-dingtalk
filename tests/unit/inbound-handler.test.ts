@@ -333,6 +333,10 @@ describe('inbound-handler', () => {
 
     it('resolves originalMsgId via quote journal and prepends recovered quoted text', async () => {
         const runtime = buildRuntime();
+        runtime.channel.session.resolveStorePath = vi
+            .fn()
+            .mockReturnValueOnce('/tmp/dm-agent-store.json')
+            .mockReturnValueOnce('/tmp/dm-account-store.json');
         shared.getRuntimeMock.mockReturnValueOnce(runtime);
         shared.extractMessageContentMock.mockReturnValueOnce({
             text: '[这是一条引用消息，原消息ID: orig_msg_001]\n\nhello',
@@ -374,6 +378,45 @@ describe('inbound-handler', () => {
 
         const envelopeArg = (runtime.channel.reply.formatInboundEnvelope as any).mock.calls[0]?.[0];
         expect(envelopeArg.body).toContain('[引用消息: "历史原文"]');
+    });
+
+    it('uses DingTalk DM conversationId for journal writes instead of senderId', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.session.resolveStorePath = vi
+            .fn()
+            .mockReturnValueOnce('/tmp/dm-agent-store.json')
+            .mockReturnValueOnce('/tmp/dm-account-store.json');
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown' } as any,
+            data: {
+                msgId: 'm_dm_1',
+                msgtype: 'text',
+                text: { content: 'hello dm' },
+                conversationType: '1',
+                conversationId: 'cid_dm_stable',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: 1700000000000,
+            },
+        } as any);
+
+        expect(shared.appendQuoteJournalEntryMock).toHaveBeenCalledWith(
+            expect.objectContaining({
+                conversationId: 'cid_dm_stable',
+            }),
+        );
+        expect(shared.appendQuoteJournalEntryMock).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+                conversationId: 'user_1',
+            }),
+        );
     });
 
     it('handleDingTalkMessage runs non-card flow and sends thinking + final outputs', async () => {

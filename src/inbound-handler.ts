@@ -589,6 +589,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             atUserId: !isDirect ? senderId : null,
             log,
             card: currentAICard,
+            accountId,
+            storePath,
+            conversationId: groupId,
           });
           if (!sendResult.ok) {
             throw new Error(sendResult.error || "Thinking message send failed");
@@ -639,13 +642,16 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 );
                 const toolText = formatContentForCard(textToSend, "tool");
                 if (toolText) {
-              const sendResult = await sendMessage(dingtalkConfig, to, toolText, {
-                sessionWebhook,
-                atUserId: !isDirect ? senderId : null,
-                log,
-                card: currentAICard,
-                cardUpdateMode: "append",
-              });
+                  const sendResult = await sendMessage(dingtalkConfig, to, toolText, {
+                    sessionWebhook,
+                    atUserId: !isDirect ? senderId : null,
+                    log,
+                    card: currentAICard,
+                    accountId,
+                    storePath,
+                    conversationId: groupId,
+                    cardUpdateMode: "append",
+                  });
                   if (!sendResult.ok) {
                     throw new Error(sendResult.error || "Tool stream send failed");
                   }
@@ -660,6 +666,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 atUserId: !isDirect ? senderId : null,
                 log,
                 card: currentAICard,
+                accountId,
+                storePath,
+                conversationId: groupId,
               });
               if (!sendResult.ok) {
                 throw new Error(sendResult.error || "Reply send failed");
@@ -694,6 +703,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 atUserId: !isDirect ? senderId : null,
                 log,
                 card: currentAICard,
+                accountId,
+                storePath,
+                conversationId: groupId,
                 cardUpdateMode: "append",
               });
               if (!sendResult.ok) {
