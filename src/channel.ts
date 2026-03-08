@@ -884,6 +884,7 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
     defaultRuntime: {
       accountId: "default",
       running: false,
+      lastEventAt: null,
       lastStartAt: null,
       lastStopAt: null,
       lastError: null,
@@ -929,18 +930,24 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
         return { ok: false, error: error.message };
       }
     },
-    buildAccountSnapshot: ({ account, runtime, snapshot, probe }: any) => ({
-      accountId: account.accountId,
-      name: account.name,
-      enabled: account.enabled,
-      configured: account.configured,
-      clientId: account.config?.clientId ?? null,
-      running: runtime?.running ?? snapshot?.running ?? false,
-      lastStartAt: runtime?.lastStartAt ?? snapshot?.lastStartAt ?? null,
-      lastStopAt: runtime?.lastStopAt ?? snapshot?.lastStopAt ?? null,
-      lastError: runtime?.lastError ?? snapshot?.lastError ?? null,
-      probe,
-    }),
+    buildAccountSnapshot: ({ account, runtime, snapshot, probe }: any) => {
+      const running = runtime?.running ?? snapshot?.running ?? false;
+      const persistedLastEventAt = runtime?.lastEventAt ?? snapshot?.lastEventAt ?? null;
+
+      return {
+        accountId: account.accountId,
+        name: account.name,
+        enabled: account.enabled,
+        configured: account.configured,
+        clientId: account.config?.clientId ?? null,
+        running,
+        lastEventAt: running ? Date.now() : persistedLastEventAt,
+        lastStartAt: runtime?.lastStartAt ?? snapshot?.lastStartAt ?? null,
+        lastStopAt: runtime?.lastStopAt ?? snapshot?.lastStopAt ?? null,
+        lastError: runtime?.lastError ?? snapshot?.lastError ?? null,
+        probe,
+      };
+    },
   },
 };
 
