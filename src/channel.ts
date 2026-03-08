@@ -941,7 +941,7 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
         configured: account.configured,
         clientId: account.config?.clientId ?? null,
         running,
-        lastEventAt: running ? Date.now() : persistedLastEventAt,
+        lastEventAt: running ? getCurrentTimestamp() : persistedLastEventAt,
         lastStartAt: runtime?.lastStartAt ?? snapshot?.lastStartAt ?? null,
         lastStopAt: runtime?.lastStopAt ?? snapshot?.lastStopAt ?? null,
         lastError: runtime?.lastError ?? snapshot?.lastError ?? null,
