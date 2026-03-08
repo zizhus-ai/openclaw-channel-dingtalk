@@ -20,7 +20,24 @@ const DINGTALK_API = "https://api.dingtalk.com";
 const THINKING_TRUNCATE_LENGTH = 500;
 const CARD_STATE_FILE_VERSION = 1;
 const CARD_PENDING_NAMESPACE = "cards.active.pending";
+const CARD_PROCESS_QUERY_NAMESPACE = "cards.content.quote-process-query";
 const RECOVERY_FINALIZE_MESSAGE = "⚠️ 上一次回复处理中断，已自动结束。请重新发送你的问题。";
+
+function extractCardProcessQueryKey(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const data = payload as Record<string, any>;
+  const deliverResults = data.result?.deliverResults;
+  if (Array.isArray(deliverResults)) {
+    for (const item of deliverResults) {
+      if (typeof item?.carrierId === "string" && item.carrierId.trim()) {
+        return item.carrierId.trim();
+      }
+    }
+  }
+  return undefined;
+}
 
 interface CreateAICardOptions {
   accountId?: string;
@@ -427,6 +444,7 @@ export async function createAICard(
     // Return the AI card instance with config reference for token refresh/recovery.
     const aiCardInstance: AICardInstance = {
       cardInstanceId,
+      processQueryKey: extractCardProcessQueryKey(resp.data),
       accessToken: token,
       conversationId,
       accountId: options.accountId,
@@ -602,9 +620,118 @@ export async function finishAICard(
 ): Promise<void> {
   log?.debug?.(`[DingTalk][AICard] Starting finish, final content length=${content.length}`);
   await streamAICard(card, content, true, log);
-  if (card.conversationId && content.trim()) {
-    cacheCardContent(card.accountId || "", card.conversationId, content, card.createdAt, card.storePath);
+  if (card.conversationId && content.trim() && card.accountId && card.processQueryKey) {
+    cacheCardContentByProcessQueryKey(
+      card.accountId,
+      card.conversationId,
+      card.processQueryKey,
+      content,
+      card.storePath,
+    );
   }
+}
+
+interface ProcessQueryCardContentEntry {
+  content: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+interface PersistedProcessQueryCardContent {
+  updatedAt: number;
+  entries: Record<string, ProcessQueryCardContentEntry>;
+}
+
+function readProcessQueryCardContent(
+  accountId: string,
+  conversationId: string,
+  storePath?: string,
+): PersistedProcessQueryCardContent {
+  if (!storePath) {
+    return { updatedAt: 0, entries: {} };
+  }
+  return readNamespaceJson<PersistedProcessQueryCardContent>(CARD_PROCESS_QUERY_NAMESPACE, {
+    storePath,
+    scope: { accountId, conversationId },
+    format: "json",
+    fallback: { updatedAt: 0, entries: {} },
+  });
+}
+
+function writeProcessQueryCardContent(
+  accountId: string,
+  conversationId: string,
+  data: PersistedProcessQueryCardContent,
+  storePath?: string,
+): void {
+  if (!storePath) {
+    return;
+  }
+  writeNamespaceJsonAtomic(CARD_PROCESS_QUERY_NAMESPACE, {
+    storePath,
+    scope: { accountId, conversationId },
+    format: "json",
+    data,
+  });
+}
+
+function purgeExpiredProcessQueryEntries(
+  persisted: PersistedProcessQueryCardContent,
+  nowMs: number,
+): boolean {
+  let changed = false;
+  for (const [key, entry] of Object.entries(persisted.entries)) {
+    if (!entry || typeof entry.expiresAt !== "number" || nowMs >= entry.expiresAt) {
+      delete persisted.entries[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+export function cacheCardContentByProcessQueryKey(
+  accountId: string,
+  conversationId: string,
+  processQueryKey: string,
+  content: string,
+  storePath?: string,
+): void {
+  if (!processQueryKey.trim() || !content.trim() || !storePath) {
+    return;
+  }
+  const nowMs = Date.now();
+  const persisted = readProcessQueryCardContent(accountId, conversationId, storePath);
+  purgeExpiredProcessQueryEntries(persisted, nowMs);
+  persisted.entries[processQueryKey] = {
+    content,
+    createdAt: nowMs,
+    expiresAt: nowMs + CARD_CACHE_TTL_MS,
+  };
+  persisted.updatedAt = nowMs;
+  writeProcessQueryCardContent(accountId, conversationId, persisted, storePath);
+}
+
+export function getCardContentByProcessQueryKey(
+  accountId: string,
+  conversationId: string,
+  processQueryKey: string,
+  storePath?: string,
+): string | null {
+  if (!processQueryKey.trim() || !storePath) {
+    return null;
+  }
+  const nowMs = Date.now();
+  const persisted = readProcessQueryCardContent(accountId, conversationId, storePath);
+  const changed = purgeExpiredProcessQueryEntries(persisted, nowMs);
+  const entry = persisted.entries[processQueryKey];
+  if (!entry) {
+    if (changed) {
+      persisted.updatedAt = nowMs;
+      writeProcessQueryCardContent(accountId, conversationId, persisted, storePath);
+    }
+    return null;
+  }
+  return entry.content;
 }
 
 // ============ Card content cache (for quoted card lookup) ============

@@ -157,4 +157,22 @@ describe('quoted-msg-cache', () => {
         expect(restored!.spaceId).toBe('space_1');
         expect(restored!.fileId).toBe('file_1');
     });
+
+    it('允许仅持久化 spaceId/fileId 以支持群文件二次精确恢复', () => {
+        cacheInboundDownloadCode(
+            'default',
+            'conv_group',
+            'msg_group_1',
+            undefined,
+            'file',
+            Date.now(),
+            { storePath, spaceId: 'space_group_1', fileId: 'dentry_group_1' },
+        );
+
+        const restored = getCachedDownloadCode('default', 'conv_group', 'msg_group_1', storePath);
+        expect(restored).not.toBeNull();
+        expect(restored!.downloadCode).toBeUndefined();
+        expect(restored!.spaceId).toBe('space_group_1');
+        expect(restored!.fileId).toBe('dentry_group_1');
+    });
 });

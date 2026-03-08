@@ -131,7 +131,34 @@ describe('message-utils', () => {
         expect(content.quoted?.msgId).toBe('msg123');
     });
 
-    it('引用 AI 卡片（interactiveCard）— isQuotedCard, cardCreatedAt', () => {
+    it('引用 AI 卡片（interactiveCard）— isQuotedCard, processQueryKey', () => {
+        const message = {
+            msgId: 'test',
+            createAt: 0,
+            conversationType: '1',
+            conversationId: 'cid',
+            senderId: 'sid',
+            chatbotUserId: 'bot',
+            sessionWebhook: 'https://example.com',
+            originalProcessQueryKey: 'carrier_123',
+            msgtype: 'text',
+            text: {
+                content: '关于你的回复',
+                isReplyMsg: true,
+                repliedMsg: {
+                    senderId: 'bot',
+                    msgType: 'interactiveCard',
+                },
+            },
+        } as any;
+
+        const content = extractMessageContent(message);
+
+        expect(content.quoted?.isQuotedCard).toBe(true);
+        expect(content.quoted?.processQueryKey).toBe('carrier_123');
+    });
+
+    it('引用钉钉文档卡片（interactiveCard from user）— isQuotedDocCard and msgId', () => {
         const message = {
             msgId: 'test',
             createAt: 0,
@@ -142,19 +169,55 @@ describe('message-utils', () => {
             sessionWebhook: 'https://example.com',
             msgtype: 'text',
             text: {
-                content: '关于你的回复',
+                content: '关于文档',
                 isReplyMsg: true,
                 repliedMsg: {
+                    senderId: 'user_sender',
                     msgType: 'interactiveCard',
-                    createdAt: 1772817989679,
+                    msgId: 'doc_msg_1',
                 },
             },
         } as any;
 
         const content = extractMessageContent(message);
 
-        expect(content.quoted?.isQuotedCard).toBe(true);
-        expect(content.quoted?.cardCreatedAt).toBe(1772817989679);
+        expect(content.quoted?.isQuotedDocCard).toBe(true);
+        expect(content.quoted?.msgId).toBe('doc_msg_1');
+        expect(content.quoted?.prefix).toContain('钉钉文档');
+    });
+
+    it('引用富文本（richText msgType）— extracts summary and picture downloadCode', () => {
+        const message = {
+            msgId: 'test',
+            createAt: 0,
+            conversationType: '2',
+            conversationId: 'cid',
+            senderId: 'sid',
+            chatbotUserId: 'bot',
+            sessionWebhook: 'https://example.com',
+            msgtype: 'text',
+            text: {
+                content: '当前消息',
+                isReplyMsg: true,
+                repliedMsg: {
+                    msgType: 'richText',
+                    content: {
+                        richText: [
+                            { msgType: 'text', content: '@傲小天' },
+                            { msgType: 'picture', downloadCode: 'dl_pic_rich_1' },
+                            { msgType: 'text', content: '测试11111' },
+                        ],
+                    },
+                },
+            },
+        } as any;
+
+        const content = extractMessageContent(message);
+
+        expect(content.quoted?.prefix).toContain('@傲小天');
+        expect(content.quoted?.prefix).toContain('测试11111');
+        expect(content.quoted?.mediaDownloadCode).toBe('dl_pic_rich_1');
+        expect(content.quoted?.mediaType).toBe('image');
     });
 
     it('其他未知 msgType — generic fallback prefix', () => {
@@ -289,5 +352,50 @@ describe('message-utils', () => {
         const content = extractMessageContent(message);
 
         expect(content.quoted?.prefix).toContain('新引用');
+    });
+
+    it('原始钉钉文档消息（interactiveCard）— extracts spaceId/fileId from biz_custom_action_url', () => {
+        const message = {
+            msgId: 'doc_msg',
+            createAt: 0,
+            conversationType: '1',
+            conversationId: 'cid',
+            senderId: 'sid',
+            chatbotUserId: 'bot',
+            sessionWebhook: 'https://example.com',
+            msgtype: 'interactiveCard',
+            content: {
+                biz_custom_action_url: 'dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=28299679864&fileId=211213307938&type=file',
+            },
+        } as any;
+
+        const content = extractMessageContent(message);
+
+        expect(content.messageType).toBe('interactiveCardFile');
+        expect(content.docSpaceId).toBe('28299679864');
+        expect(content.docFileId).toBe('211213307938');
+        expect(content.text).toContain('钉钉文档');
+    });
+
+    it('原始钉钉文档消息 URL 缺少必需参数时安全降级', () => {
+        const message = {
+            msgId: 'doc_msg',
+            createAt: 0,
+            conversationType: '1',
+            conversationId: 'cid',
+            senderId: 'sid',
+            chatbotUserId: 'bot',
+            sessionWebhook: 'https://example.com',
+            msgtype: 'interactiveCard',
+            content: {
+                biz_custom_action_url: 'dingtalk://dingtalkclient/page/yunpan?route=previewDentry&type=file',
+            },
+        } as any;
+
+        const content = extractMessageContent(message);
+
+        expect(content.messageType).toBe('interactiveCard');
+        expect(content.docSpaceId).toBeUndefined();
+        expect(content.docFileId).toBeUndefined();
     });
 });

@@ -6,7 +6,7 @@ const MAX_CONVERSATIONS = 1000;
 const QUOTED_MSG_NAMESPACE = "quoted.msg-download-code";
 
 export interface DownloadCodeCacheEntry {
-    downloadCode: string;
+    downloadCode?: string;
     msgType: string;
     createdAt: number;
     expiresAt: number;
@@ -31,14 +31,21 @@ function isValidPersistedEntry(entry: unknown): entry is DownloadCodeCacheEntry 
 
     const candidate = entry as Partial<DownloadCodeCacheEntry>;
     return (
-        typeof candidate.downloadCode === 'string' &&
-        candidate.downloadCode.length > 0 &&
         typeof candidate.msgType === 'string' &&
         candidate.msgType.length > 0 &&
         typeof candidate.createdAt === 'number' &&
         Number.isFinite(candidate.createdAt) &&
         typeof candidate.expiresAt === 'number' &&
-        Number.isFinite(candidate.expiresAt)
+        Number.isFinite(candidate.expiresAt) &&
+        (
+            (typeof candidate.downloadCode === 'string' && candidate.downloadCode.length > 0) ||
+            (
+                typeof candidate.spaceId === 'string' &&
+                candidate.spaceId.length > 0 &&
+                typeof candidate.fileId === 'string' &&
+                candidate.fileId.length > 0
+            )
+        )
     );
 }
 
@@ -164,11 +171,14 @@ export function cacheInboundDownloadCode(
     accountId: string,
     conversationId: string,
     msgId: string,
-    downloadCode: string,
+    downloadCode: string | undefined,
     msgType: string,
     createdAt: number,
     extra?: { spaceId?: string; fileId?: string; storePath?: string },
 ): void {
+    if (!downloadCode && !extra?.spaceId && !extra?.fileId) {
+        return;
+    }
     const scopedKey = `${accountId}:${conversationId}`;
     const bucket = getOrCreateBucket(scopedKey);
     purgeExpiredEntries(bucket);

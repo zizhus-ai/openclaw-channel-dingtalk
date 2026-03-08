@@ -23,6 +23,7 @@ import {
     finalizeActiveCardsForAccount,
     finishAICard,
     formatContentForCard,
+    getCardContentByProcessQueryKey,
     recoverPendingCardsForAccount,
     sendProactiveCardText,
     streamAICard,
@@ -64,7 +65,10 @@ describe('card-service', () => {
     });
 
     it('createAICard returns card instance', async () => {
-        mockedAxios.post.mockResolvedValueOnce({ status: 200, data: { ok: true } });
+        mockedAxios.post.mockResolvedValueOnce({
+            status: 200,
+            data: { result: { deliverResults: [{ carrierId: 'carrier_1' }] } },
+        });
 
         const card = await createAICard(
             { clientId: 'id', clientSecret: 'sec', cardTemplateId: 'tmpl.schema', robotCode: 'id' } as any,
@@ -73,6 +77,7 @@ describe('card-service', () => {
 
         expect(card).toBeTruthy();
         expect(card?.state).toBe(AICardStatus.PROCESSING);
+        expect(card?.processQueryKey).toBe('carrier_1');
         expect(mockedAxios.post).toHaveBeenCalledTimes(1);
         const body = mockedAxios.post.mock.calls[0]?.[1];
         expect(body.cardData?.cardParamMap).toEqual({ content: '' });
@@ -158,6 +163,29 @@ describe('card-service', () => {
         await finishAICard(card, 'final text');
 
         expect(card.state).toBe(AICardStatus.FINISHED);
+    });
+
+    it('finishAICard persists card content by processQueryKey', async () => {
+        mockedAxios.put.mockResolvedValueOnce({ status: 200, data: { ok: true } });
+
+        const card = {
+            cardInstanceId: 'card_quoted',
+            processQueryKey: 'carrier_quoted',
+            accessToken: 'token_abc',
+            conversationId: 'cidA1B2C3',
+            accountId: 'main',
+            storePath,
+            createdAt: Date.now(),
+            lastUpdated: Date.now(),
+            state: AICardStatus.INPUTING,
+            config: { cardTemplateKey: 'content' },
+        } as any;
+
+        await finishAICard(card, 'final text');
+
+        expect(getCardContentByProcessQueryKey('main', 'cidA1B2C3', 'carrier_quoted', storePath)).toBe(
+            'final text'
+        );
     });
 
     it('streamAICard marks FAILED and sends mismatch notification on 500 unknownError', async () => {

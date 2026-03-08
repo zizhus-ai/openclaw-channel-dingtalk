@@ -12,7 +12,7 @@ import {
 } from '../../src/quoted-msg-cache';
 import {
     clearCardContentCacheForTest,
-    findCardContent,
+    getCardContentByProcessQueryKey,
 } from '../../src/card-service';
 import { resolveNamespacePath } from '../../src/persistence-store';
 
@@ -88,7 +88,7 @@ describe('persistence migration sanity', () => {
             ),
         );
 
-        const cardPath = resolveNamespacePath('cards.content.quote-lookup', {
+        const cardPath = resolveNamespacePath('cards.content.quote-process-query', {
             storePath,
             scope: { accountId, conversationId },
             format: 'json',
@@ -99,13 +99,13 @@ describe('persistence migration sanity', () => {
             JSON.stringify(
                 {
                     updatedAt: Date.now(),
-                    entries: [
-                        {
+                    entries: {
+                        carrier_restore: {
                             content: 'restored card content',
                             createdAt: 1_000_000,
                             expiresAt: Date.now() + 60_000,
                         },
-                    ],
+                    },
                 },
                 null,
                 2,
@@ -120,7 +120,7 @@ describe('persistence migration sanity', () => {
         expect(quoted!.downloadCode).toBe('dl_restore');
         expect(quoted!.spaceId).toBe('space_restore');
 
-        const card = findCardContent(accountId, conversationId, 1_000_500, storePath);
+        const card = getCardContentByProcessQueryKey(accountId, conversationId, 'carrier_restore', storePath);
         expect(card).toBe('restored card content');
     });
 });

@@ -5,9 +5,14 @@ const shared = vi.hoisted(() => ({
     sendBySessionMock: vi.fn(),
     sendMessageMock: vi.fn(),
     extractMessageContentMock: vi.fn(),
+    findCardContentMock: vi.fn(),
+    getCardContentByProcessQueryKeyMock: vi.fn(),
+    downloadGroupFileMock: vi.fn(),
     getRuntimeMock: vi.fn(),
+    getUnionIdByStaffIdMock: vi.fn(),
     createAICardMock: vi.fn(),
     finishAICardMock: vi.fn(),
+    resolveQuotedFileMock: vi.fn(),
     streamAICardMock: vi.fn(),
     formatContentForCardMock: vi.fn((s: string) => s),
     isCardInTerminalStateMock: vi.fn(),
@@ -41,8 +46,10 @@ vi.mock('../../src/send-service', () => ({
 
 vi.mock('../../src/card-service', () => ({
     createAICard: shared.createAICardMock,
+    findCardContent: shared.findCardContentMock,
     finishAICard: shared.finishAICardMock,
     formatContentForCard: shared.formatContentForCardMock,
+    getCardContentByProcessQueryKey: shared.getCardContentByProcessQueryKeyMock,
     isCardInTerminalState: shared.isCardInTerminalStateMock,
     streamAICard: shared.streamAICardMock,
 }));
@@ -51,11 +58,18 @@ vi.mock('../../src/session-lock', () => ({
     acquireSessionLock: shared.acquireSessionLockMock,
 }));
 
+vi.mock('../../src/quoted-file-service', () => ({
+    downloadGroupFile: shared.downloadGroupFileMock,
+    getUnionIdByStaffId: shared.getUnionIdByStaffIdMock,
+    resolveQuotedFile: shared.resolveQuotedFileMock,
+}));
+
 import {
     downloadMedia,
     handleDingTalkMessage,
     resetProactivePermissionHintStateForTest,
 } from '../../src/inbound-handler';
+import { cacheInboundDownloadCode, clearQuotedMsgCacheForTest, getCachedDownloadCode } from '../../src/quoted-msg-cache';
 import { recordProactiveRiskObservation } from '../../src/proactive-risk-registry';
 
 const mockedAxiosPost = vi.mocked(axios.post);
@@ -99,8 +113,18 @@ describe('inbound-handler', () => {
         shared.sendMessageMock.mockReset();
         shared.sendMessageMock.mockResolvedValue({ ok: true });
         shared.extractMessageContentMock.mockReset();
+        shared.findCardContentMock.mockReset();
+        shared.findCardContentMock.mockReturnValue(null);
+        shared.getCardContentByProcessQueryKeyMock.mockReset();
+        shared.getCardContentByProcessQueryKeyMock.mockReturnValue(null);
         shared.createAICardMock.mockReset();
+        shared.downloadGroupFileMock.mockReset();
+        shared.downloadGroupFileMock.mockResolvedValue(null);
         shared.finishAICardMock.mockReset();
+        shared.getUnionIdByStaffIdMock.mockReset();
+        shared.getUnionIdByStaffIdMock.mockResolvedValue('union_1');
+        shared.resolveQuotedFileMock.mockReset();
+        shared.resolveQuotedFileMock.mockResolvedValue(null);
         shared.streamAICardMock.mockReset();
         shared.isCardInTerminalStateMock.mockReset();
 
@@ -110,6 +134,7 @@ describe('inbound-handler', () => {
         shared.getRuntimeMock.mockReturnValue(buildRuntime());
         shared.extractMessageContentMock.mockReturnValue({ text: 'hello', messageType: 'text' });
         resetProactivePermissionHintStateForTest();
+        clearQuotedMsgCacheForTest();
         shared.createAICardMock.mockResolvedValue({
             cardInstanceId: 'card_1',
             state: '1',
@@ -300,6 +325,433 @@ describe('inbound-handler', () => {
         } as any);
 
         expect(shared.sendMessageMock).toHaveBeenCalled();
+    });
+
+    it('handleDingTalkMessage restores quoted card by originalProcessQueryKey', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.session.resolveStorePath = vi
+            .fn()
+            .mockReturnValueOnce('/tmp/agent-store.json')
+            .mockReturnValueOnce('/tmp/account-store.json');
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用了机器人的回复]\n\nhello',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用了机器人的回复]\n\n',
+                isQuotedCard: true,
+                processQueryKey: 'carrier_quoted_1',
+            },
+        });
+        shared.getCardContentByProcessQueryKeyMock.mockReturnValueOnce('机器人之前的回复内容');
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+            data: {
+                msgId: 'm5_card_quote',
+                msgtype: 'text',
+                text: { content: 'hello', isReplyMsg: true },
+                originalProcessQueryKey: 'carrier_quoted_1',
+                conversationType: '1',
+                conversationId: 'cid_ok',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.getCardContentByProcessQueryKeyMock).toHaveBeenCalledWith(
+            'main',
+            'user_1',
+            'carrier_quoted_1',
+            '/tmp/account-store.json',
+        );
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[引用机器人回复: "机器人之前的回复内容"]\n\nhello',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage falls back to createdAt matcher only when processQueryKey is missing', async () => {
+        const runtime = buildRuntime();
+        runtime.channel.session.resolveStorePath = vi
+            .fn()
+            .mockReturnValueOnce('/tmp/agent-store.json')
+            .mockReturnValueOnce('/tmp/account-store.json');
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用了机器人的回复]\n\nhello',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用了机器人的回复]\n\n',
+                isQuotedCard: true,
+                cardCreatedAt: 1772817989679,
+            },
+        });
+        shared.findCardContentMock.mockReturnValueOnce('旧兼容卡片内容');
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+            data: {
+                msgId: 'm5_card_fallback',
+                msgtype: 'text',
+                text: { content: 'hello', isReplyMsg: true },
+                conversationType: '1',
+                conversationId: 'cid_ok',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.getCardContentByProcessQueryKeyMock).not.toHaveBeenCalled();
+        expect(shared.findCardContentMock).toHaveBeenCalledWith(
+            'main',
+            'user_1',
+            1772817989679,
+            '/tmp/account-store.json',
+        );
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[引用机器人回复: "旧兼容卡片内容"]\n\nhello',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage persists group quoted file metadata after API fallback succeeds', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用文件]\n\n群聊文件',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用文件]\n\n',
+                isQuotedFile: true,
+                msgId: 'group_file_msg_1',
+                fileCreatedAt: 1772863284581,
+            },
+        });
+        shared.resolveQuotedFileMock.mockResolvedValueOnce({
+            media: { path: '/tmp/.openclaw/media/inbound/group-file.bin', mimeType: 'application/octet-stream' },
+            spaceId: 'space_group_1',
+            fileId: 'dentry_group_1',
+            name: 'a.sql',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'm_group_file_quote_1',
+                msgtype: 'text',
+                text: { content: '群聊文件', isReplyMsg: true },
+                conversationType: '2',
+                conversationId: 'cid_group_1',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.resolveQuotedFileMock).toHaveBeenCalledTimes(1);
+        const restored = getCachedDownloadCode('main', 'cid_group_1', 'group_file_msg_1', '/tmp/store.json');
+        expect(restored).not.toBeNull();
+        expect(restored!.downloadCode).toBeUndefined();
+        expect(restored!.spaceId).toBe('space_group_1');
+        expect(restored!.fileId).toBe('dentry_group_1');
+    });
+
+    it('handleDingTalkMessage downloads single-chat doc card and persists msgId metadata', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[钉钉文档]\n\n',
+            messageType: 'interactiveCardFile',
+            docSpaceId: 'space_doc_1',
+            docFileId: 'file_doc_1',
+        });
+        shared.downloadGroupFileMock.mockResolvedValueOnce({
+            path: '/tmp/.openclaw/media/inbound/doc-card.bin',
+            mimeType: 'application/pdf',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'doc_origin_msg',
+                msgtype: 'interactiveCard',
+                content: {
+                    biz_custom_action_url: 'dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=space_doc_1&fileId=file_doc_1&type=file',
+                },
+                conversationType: '1',
+                conversationId: 'cid_dm_1',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.getUnionIdByStaffIdMock).toHaveBeenCalledTimes(1);
+        expect(shared.downloadGroupFileMock).toHaveBeenCalledWith(
+            expect.anything(),
+            'space_doc_1',
+            'file_doc_1',
+            'union_1',
+            undefined,
+        );
+        const restored = getCachedDownloadCode('main', 'cid_dm_1', 'doc_origin_msg', '/tmp/store.json');
+        expect(restored).not.toBeNull();
+        expect(restored!.spaceId).toBe('space_doc_1');
+        expect(restored!.fileId).toBe('file_doc_1');
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                MediaType: 'application/pdf',
+                RawBody: '[钉钉文档]\n\n',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage restores quoted single-chat doc card from cached metadata', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        cacheInboundDownloadCode('main', 'cid_dm_2', 'doc_origin_msg_2', undefined, 'interactiveCardFile', Date.now(), {
+            storePath: '/tmp/store.json',
+            spaceId: 'space_doc_2',
+            fileId: 'file_doc_2',
+        });
+        clearQuotedMsgCacheForTest();
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用了钉钉文档]\n\n我引用了什么？',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用了钉钉文档]\n\n',
+                isQuotedDocCard: true,
+                msgId: 'doc_origin_msg_2',
+            },
+        });
+        shared.downloadGroupFileMock.mockResolvedValueOnce({
+            path: '/tmp/.openclaw/media/inbound/doc-card-quoted.bin',
+            mimeType: 'application/pdf',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'doc_quote_msg',
+                msgtype: 'text',
+                text: { content: '我引用了什么？', isReplyMsg: true },
+                originalMsgId: 'doc_origin_msg_2',
+                conversationType: '1',
+                conversationId: 'cid_dm_2',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.downloadGroupFileMock).toHaveBeenCalledWith(
+            expect.anything(),
+            'space_doc_2',
+            'file_doc_2',
+            'union_1',
+            undefined,
+        );
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[引用了钉钉文档]\n\n我引用了什么？',
+                MediaType: 'application/pdf',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage degrades quoted doc card when cached metadata is unavailable', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        clearQuotedMsgCacheForTest();
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用了钉钉文档]\n\n1',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用了钉钉文档]\n\n',
+                isQuotedDocCard: true,
+                msgId: 'missing_doc_msg',
+            },
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'doc_quote_group_msg',
+                msgtype: 'text',
+                text: { content: '1', isReplyMsg: true },
+                originalMsgId: 'missing_doc_msg',
+                conversationType: '2',
+                conversationId: 'cid_group_doc',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.resolveQuotedFileMock).not.toHaveBeenCalled();
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[引用了钉钉文档，但无法获取内容]\n\n1',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage falls back to group-file resolution for quoted doc card in group chat', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        clearQuotedMsgCacheForTest();
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用了钉钉文档]\n\n1',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用了钉钉文档]\n\n',
+                isQuotedDocCard: true,
+                msgId: 'group_doc_msg',
+                fileCreatedAt: 1772901945282,
+            },
+        });
+        shared.resolveQuotedFileMock.mockResolvedValueOnce({
+            media: { path: '/tmp/.openclaw/media/inbound/group-doc.bin', mimeType: 'application/pdf' },
+            spaceId: 'space_group_doc',
+            fileId: 'file_group_doc',
+            name: 'doc.pdf',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'group_doc_quote',
+                msgtype: 'text',
+                text: { content: '1', isReplyMsg: true },
+                originalMsgId: 'group_doc_msg',
+                conversationType: '2',
+                conversationId: 'cid_group_doc',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.resolveQuotedFileMock).toHaveBeenCalledWith(
+            expect.anything(),
+            {
+                openConversationId: 'cid_group_doc',
+                senderStaffId: 'staff_1',
+                fileCreatedAt: 1772901945282,
+            },
+            undefined,
+        );
+        const restored = getCachedDownloadCode('main', 'cid_group_doc', 'group_doc_msg', '/tmp/store.json');
+        expect(restored).not.toBeNull();
+        expect(restored!.spaceId).toBe('space_group_doc');
+        expect(restored!.fileId).toBe('file_group_doc');
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[引用了钉钉文档]\n\n1',
+                MediaType: 'application/pdf',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage restores group quoted file from persisted metadata without fallback query', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        clearQuotedMsgCacheForTest();
+        cacheInboundDownloadCode('main', 'cid_group_2', 'file_origin', undefined, 'file', Date.now(), {
+            storePath: '/tmp/store.json',
+            spaceId: 'space_group_2',
+            fileId: 'dentry_group_2',
+        });
+        clearQuotedMsgCacheForTest();
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[引用文件]\n\n群聊文件',
+            messageType: 'text',
+            quoted: {
+                prefix: '[引用文件]\n\n',
+                isQuotedFile: true,
+                msgId: 'file_origin',
+                fileCreatedAt: 1772863284581,
+            },
+        });
+        shared.downloadGroupFileMock.mockResolvedValueOnce({
+            path: '/tmp/.openclaw/media/inbound/group-file.bin',
+            mimeType: 'application/octet-stream',
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'm_group_file_quote_2',
+                msgtype: 'text',
+                text: { content: '群聊文件', isReplyMsg: true },
+                conversationType: '2',
+                conversationId: 'cid_group_2',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.resolveQuotedFileMock).not.toHaveBeenCalled();
+        expect(shared.getUnionIdByStaffIdMock).toHaveBeenCalledTimes(1);
+        expect(shared.downloadGroupFileMock).toHaveBeenCalledWith(
+            expect.anything(),
+            'space_group_2',
+            'dentry_group_2',
+            'union_1',
+            undefined,
+        );
     });
 
     it('handleDingTalkMessage finalizes card with default content when no textual output is produced', async () => {

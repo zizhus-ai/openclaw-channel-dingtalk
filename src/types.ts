@@ -166,12 +166,15 @@ export interface DingTalkInboundMessage {
       content?: {
         text?: string;
         downloadCode?: string;
+        biz_custom_action_url?: string;
         richText?: Array<{
           msgType?: string;
           type?: string;
           content?: string;
+          text?: string;
           code?: string;
           atName?: string;
+          downloadCode?: string;
         }>;
       };
     };
@@ -182,6 +185,7 @@ export interface DingTalkInboundMessage {
     recognition?: string;
     spaceId?: string;
     fileId?: string;
+    biz_custom_action_url?: string;
     richText?: Array<{
       type: string;
       text?: string;
@@ -200,6 +204,7 @@ export interface DingTalkInboundMessage {
   };
   // 富媒体引用，仅有消息ID的情况（包括手机端和PC端）
   originalMsgId?: string;
+  originalProcessQueryKey?: string;
   conversationType: string;
   conversationId: string;
   conversationTitle?: string;
@@ -221,7 +226,11 @@ export interface QuotedInfo {
   mediaType?: string;
   isQuotedFile?: boolean;
   isQuotedCard?: boolean;
+  isQuotedDocCard?: boolean;
+  docSpaceId?: string;
+  docFileId?: string;
   cardCreatedAt?: number;
+  processQueryKey?: string;
   fileCreatedAt?: number;
   msgId?: string;
 }
@@ -234,6 +243,8 @@ export interface MessageContent {
   mediaPath?: string;
   mediaType?: string;
   messageType: string;
+  docSpaceId?: string;
+  docFileId?: string;
   quoted?: QuotedInfo;
 }
 
@@ -478,6 +489,7 @@ export type AICardState = (typeof AICardStatus)[keyof typeof AICardStatus];
  */
 export interface AICardInstance {
   cardInstanceId: string;
+  processQueryKey?: string;
   accessToken: string;
   conversationId: string;
   accountId?: string;
