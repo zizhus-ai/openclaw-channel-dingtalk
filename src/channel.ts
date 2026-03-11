@@ -144,6 +144,7 @@ const inboundCountersByAccount = new Map<
 >();
 const INBOUND_COUNTER_LOG_EVERY = 10;
 const DEFAULT_ASYNC_ACK_TEXT = "已收到，正在处理中，稍后回复。";
+const DEFAULT_ASYNC_FAILURE_TEXT = "⚠️ 处理失败，请稍后重试。";
 
 function getInboundCounters(accountId: string) {
   const existing = inboundCountersByAccount.get(accountId);
@@ -185,6 +186,25 @@ function shouldHandleAsync(data: DingTalkInboundMessage, config: DingTalkConfig)
     return false;
   }
   return true;
+}
+
+async function sendAsyncFailureNotice(
+  config: DingTalkConfig,
+  data: DingTalkInboundMessage,
+  log: any,
+  accountId: string,
+  dedupKey: string,
+): Promise<void> {
+  if (!data.sessionWebhook) {
+    return;
+  }
+  try {
+    await sendBySession(config, data.sessionWebhook, DEFAULT_ASYNC_FAILURE_TEXT, { log });
+  } catch (notifyError: any) {
+    log?.warn?.(
+      `[${accountId}] Failed to send async failure notice for ${dedupKey}: ${notifyError.message}`,
+    );
+  }
 }
 
 function readBooleanLikeParam(params: Record<string, unknown>, key: string): boolean | undefined {
@@ -630,6 +650,7 @@ export const dingtalkPlugin: DingTalkChannelPlugin = {
           try {
             const data = JSON.parse(res.data) as DingTalkInboundMessage;
 
+            // Message deduplication key is bot-scoped to avoid cross-account conflicts.
             const robotKey = config.robotCode || config.clientId || account.accountId;
             const msgId = data.msgId || messageId;
             const dedupKey = msgId ? `${robotKey}:${msgId}` : undefined;

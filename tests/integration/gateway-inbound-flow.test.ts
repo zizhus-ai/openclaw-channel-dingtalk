@@ -214,6 +214,52 @@ describe('gateway inbound callback pipeline', () => {
         expect(shared.markMessageProcessedMock).toHaveBeenCalledWith('robot_1:msg_async_1');
     });
 
+    it('sends failure notice when async background processing fails after early ack', async () => {
+        shared.isMessageProcessedMock.mockReturnValue(false);
+        shared.handleDingTalkMessageMock.mockRejectedValueOnce(new Error('async failure'));
+        const ctx = createStartContext();
+        ctx.account.config.asyncMode = true;
+
+        await startGatewayAccount(ctx as any);
+
+        await shared.listeners.TOPIC_ROBOT?.({
+            headers: { messageId: 'stream_msg_async_fail' },
+            data: JSON.stringify({
+                msgId: 'msg_async_fail',
+                msgtype: 'text',
+                text: { content: '请异步处理失败案例' },
+                conversationType: '1',
+                conversationId: 'cidA1B2C3',
+                senderId: 'user_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://webhook',
+            }),
+        });
+
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(shared.socketCallBackResponseMock).toHaveBeenCalledWith('stream_msg_async_fail', { success: true });
+        expect(shared.markMessageProcessedMock).not.toHaveBeenCalled();
+        expect(shared.sendBySessionMock).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({ asyncMode: true }),
+            'https://webhook',
+            '已收到，正在处理中，稍后回复。',
+            expect.objectContaining({ log: ctx.log }),
+        );
+        expect(shared.sendBySessionMock).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({ asyncMode: true }),
+            'https://webhook',
+            '⚠️ 处理失败，请稍后重试。',
+            expect.objectContaining({ log: ctx.log }),
+        );
+        expect(ctx.log.error).toHaveBeenCalledWith(
+            expect.stringContaining('Error processing async message: async failure')
+        );
+    });
+
     it('skips duplicate message dispatch when dedup indicates already processed', async () => {
         shared.isMessageProcessedMock.mockReturnValue(true);
         const ctx = createStartContext();
@@ -339,6 +385,53 @@ describe('gateway inbound callback pipeline', () => {
         expect(shared.socketCallBackResponseMock).toHaveBeenCalledTimes(1);
         expect(shared.socketCallBackResponseMock).toHaveBeenCalledWith('stream_msg_inflight_1', { success: true });
         expect(shared.socketCallBackResponseMock).not.toHaveBeenCalledWith('stream_msg_inflight_2', { success: true });
+    });
+
+    it('acknowledges in-flight duplicate callbacks in async mode to avoid pointless retries', async () => {
+        shared.isMessageProcessedMock.mockReturnValue(false);
+        let resolveFirst: (() => void) | undefined;
+        shared.handleDingTalkMessageMock.mockImplementationOnce(
+            () =>
+                new Promise<void>((resolve) => {
+                    resolveFirst = resolve;
+                })
+        );
+        const ctx = createStartContext();
+        ctx.account.config.asyncMode = true;
+
+        await startGatewayAccount(ctx as any);
+
+        const payloadData = JSON.stringify({
+            msgId: 'msg_async_inflight',
+            msgtype: 'text',
+            text: { content: 'async in flight' },
+            conversationType: '1',
+            conversationId: 'cidA1B2C3',
+            senderId: 'user_1',
+            chatbotUserId: 'bot_1',
+            sessionWebhook: 'https://webhook',
+        });
+
+        const first = shared.listeners.TOPIC_ROBOT?.({
+            headers: { messageId: 'stream_msg_async_inflight_1' },
+            data: payloadData,
+        });
+        const second = shared.listeners.TOPIC_ROBOT?.({
+            headers: { messageId: 'stream_msg_async_inflight_2' },
+            data: payloadData,
+        });
+
+        await Promise.resolve();
+
+        expect(shared.handleDingTalkMessageMock).toHaveBeenCalledTimes(1);
+        expect(shared.socketCallBackResponseMock).toHaveBeenCalledWith('stream_msg_async_inflight_1', { success: true });
+        expect(shared.socketCallBackResponseMock).toHaveBeenCalledWith('stream_msg_async_inflight_2', { success: true });
+
+        resolveFirst?.();
+        await first;
+        await second;
+
+        expect(shared.markMessageProcessedMock).toHaveBeenCalledWith('robot_1:msg_async_inflight');
     });
 
     it('releases stale in-flight lock after ttl and allows reprocessing', async () => {
