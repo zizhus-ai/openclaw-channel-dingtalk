@@ -813,4 +813,161 @@ describe('ConnectionManager', () => {
 
         expect(client.connect.mock.calls.length).toBe(connectCountAfterInit);
     });
+
+    // ── Warm reconnect (StreamClientFactory) ────────────────────────────
+
+    it('warm reconnect uses factory to create new client and cleans up old one', async () => {
+        const { client: oldClient, socket: oldSocket } = createMockClient();
+        const { client: newClient, socket: newSocket } = createMockClient();
+        const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+        const factory = vi.fn().mockReturnValue(newClient);
+
+        const manager = new ConnectionManager(
+            oldClient, 'main', baseConfig({ maxAttempts: 2 }), log, factory,
+        );
+
+        await manager.connect();
+
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(newClient.connect).toHaveBeenCalledTimes(1);
+        // Old client should be disconnected during cleanup (not before connect)
+        expect(oldClient.disconnect).toHaveBeenCalled();
+        expect(manager.isConnected()).toBe(true);
+        expect(log.info).toHaveBeenCalledWith(
+            expect.stringContaining('Warm reconnect: created fresh DWClient'),
+        );
+    });
+
+    it('warm reconnect falls back to old client when factory throws', async () => {
+        const { client } = createMockClient();
+        const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+        const factory = vi.fn().mockImplementation(() => {
+            throw new Error('factory exploded');
+        });
+
+        const manager = new ConnectionManager(
+            client, 'main', baseConfig({ maxAttempts: 1 }), log, factory,
+        );
+
+        await manager.connect();
+
+        expect(factory).toHaveBeenCalledTimes(1);
+        expect(client.connect).toHaveBeenCalledTimes(1);
+        expect(manager.isConnected()).toBe(true);
+        expect(log.warn).toHaveBeenCalledWith(
+            expect.stringContaining('Client factory failed, falling back'),
+        );
+    });
+
+    it('warm reconnect reverts to old client when new client connect fails', async () => {
+        const { client: oldClient } = createMockClient();
+        const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+        const failingNewClient = {
+            connected: false,
+            registered: false,
+            socket: undefined,
+            connect: vi.fn().mockRejectedValue(new Error('new client connect failed')),
+            disconnect: vi.fn(),
+        } as any;
+
+        const factory = vi.fn().mockReturnValue(failingNewClient);
+
+        const manager = new ConnectionManager(
+            oldClient, 'main', baseConfig({ maxAttempts: 1 }), log, factory,
+        );
+
+        await expect(manager.connect()).rejects.toThrow('Failed to connect after 1 attempts');
+
+        expect(log.debug).toHaveBeenCalledWith(
+            expect.stringContaining('Warm reconnect failed, reverted to previous client'),
+        );
+        // The internal client should have been reverted to oldClient
+        expect(failingNewClient.disconnect).toHaveBeenCalled();
+    });
+
+    it('warm reconnect cleans up old client heartbeat timer', async () => {
+        const { client: oldClient } = createMockClient();
+        const { client: newClient } = createMockClient();
+
+        const fakeIntervalId = setInterval(() => {}, 99999);
+        (oldClient as any).heartbeatIntervallId = fakeIntervalId;
+
+        const factory = vi.fn().mockReturnValue(newClient);
+
+        const manager = new ConnectionManager(
+            oldClient, 'main', baseConfig(), undefined, factory,
+        );
+
+        await manager.connect();
+
+        expect((oldClient as any).heartbeatIntervallId).toBeUndefined();
+        clearInterval(fakeIntervalId);
+    });
+
+    // ── Socket idle timeout ─────────────────────────────────────────────
+
+    it('triggers reconnection when socket is idle for 60s', async () => {
+        const { client, socket } = createMockClient();
+        const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+        const manager = new ConnectionManager(client, 'main', baseConfig(), log);
+
+        await manager.connect();
+
+        // Advance past the grace window (3s) + enough health checks to reach 60s idle
+        // Health checks run every 5s; at each check, idleMs = now - lastSocketActivityAt.
+        // lastSocketActivityAt is set to Date.now() on connect. After 60s of no
+        // socket message events, the idle threshold is met.
+        await vi.advanceTimersByTimeAsync(61_000);
+
+        expect(log.warn).toHaveBeenCalledWith(
+            expect.stringContaining('Socket idle for'),
+        );
+        expect(log.warn).toHaveBeenCalledWith(
+            expect.stringContaining('treating as zombie connection'),
+        );
+        // Should have attempted reconnection
+        expect(client.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('does not trigger idle timeout when socket receives messages', async () => {
+        const { client, socket } = createMockClient();
+
+        const manager = new ConnectionManager(client, 'main', baseConfig());
+
+        await manager.connect();
+        const connectCountAfterInit = client.connect.mock.calls.length;
+
+        // Simulate periodic messages arriving every 20s (within 60s threshold)
+        for (let i = 0; i < 5; i++) {
+            await vi.advanceTimersByTimeAsync(20_000);
+            const keepaliveMsg = JSON.stringify({
+                type: "SYSTEM",
+                headers: { topic: "KEEPALIVE" },
+                data: "",
+            });
+            socket.emit('message', keepaliveMsg);
+        }
+
+        // 100s total have passed, but no 60s idle window ever occurred
+        expect(client.connect.mock.calls.length).toBe(connectCountAfterInit);
+    });
+
+    it('idle timeout counter is tracked in runtimeCounters', async () => {
+        const { client } = createMockClient();
+        const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+        const manager = new ConnectionManager(client, 'main', baseConfig(), log);
+
+        await manager.connect();
+
+        await vi.advanceTimersByTimeAsync(61_000);
+
+        expect(log.info).toHaveBeenCalledWith(
+            expect.stringContaining('socketIdleReconnects=1'),
+        );
+    });
 });
