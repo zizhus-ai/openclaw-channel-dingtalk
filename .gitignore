@@ -31,3 +31,6 @@ docs/plans/
 
 # vscode workspace settings
 *.code-workspace
+
+# Local debug artifacts for feedback-learning tooling
+.local/

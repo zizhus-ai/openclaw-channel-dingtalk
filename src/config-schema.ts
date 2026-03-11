@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const DingTalkAccountConfigSchema = z.object({
+const DingTalkAccountConfigShape = {
   /** Account name (optional display name) */
   name: z.string().optional(),
 
@@ -90,6 +90,10 @@ const DingTalkAccountConfigSchema = z.object({
   /** Maximum inbound media file size in MB (overrides runtime default when set) */
   mediaMaxMb: z.number().int().min(1).optional(),
 
+  /** Whether to enable underlying stream keepAlive heartbeat; defaults to !useConnectionManager when omitted */
+  keepAlive: z.boolean().optional(),
+  /** Bypass system/global HTTP(S) proxy for DingTalk outbound send/card/upload APIs */
+  bypassProxyForSend: z.boolean().optional().default(false),
   proactivePermissionHint: z
     .object({
       enabled: z.boolean().optional().default(true),
@@ -100,15 +104,47 @@ const DingTalkAccountConfigSchema = z.object({
 
   /** AICard degrade duration in milliseconds after trigger errors (default: 30 minutes) */
   aicardDegradeMs: z.number().int().min(60_000).optional().default(30 * 60 * 1000),
-});
+
+  /** Enable local learning loop (default: false) */
+  learningEnabled: z.boolean().optional(),
+
+  /** Auto-apply generated reflections into session notes/global rules (default: false) */
+  learningAutoApply: z.boolean().optional(),
+
+  /** Session learning note TTL in milliseconds (default: 6 hours) */
+  learningNoteTtlMs: z.number().int().min(60_000).optional(),
+
+  /** @deprecated Use learningEnabled */
+  feedbackLearningEnabled: z.boolean().optional(),
+
+  /** @deprecated Use learningAutoApply */
+  feedbackLearningAutoApply: z.boolean().optional(),
+
+  /** @deprecated Use learningNoteTtlMs */
+  feedbackLearningNoteTtlMs: z.number().int().min(60_000).optional(),
+} as const;
+
+const DingTalkAccountConfigSchemaBase = z.object(DingTalkAccountConfigShape);
+
+const DingTalkAccountConfigSchema = DingTalkAccountConfigSchemaBase.transform((value) => ({
+  ...value,
+  learningEnabled: value.learningEnabled ?? value.feedbackLearningEnabled ?? false,
+  learningAutoApply: value.learningAutoApply ?? value.feedbackLearningAutoApply ?? false,
+  learningNoteTtlMs: value.learningNoteTtlMs ?? value.feedbackLearningNoteTtlMs ?? 6 * 60 * 60 * 1000,
+}));
 
 /**
  * DingTalk configuration schema using Zod
  * Mirrors the structure needed for proper control-ui rendering
  */
-export const DingTalkConfigSchema: z.ZodTypeAny = DingTalkAccountConfigSchema.extend({
+export const DingTalkConfigSchema: z.ZodTypeAny = DingTalkAccountConfigSchemaBase.extend({
   /** Multi-account configuration */
   accounts: z.record(z.string(), DingTalkAccountConfigSchema.optional()).optional(),
-});
+}).transform((value) => ({
+  ...value,
+  learningEnabled: value.learningEnabled ?? value.feedbackLearningEnabled ?? false,
+  learningAutoApply: value.learningAutoApply ?? value.feedbackLearningAutoApply ?? false,
+  learningNoteTtlMs: value.learningNoteTtlMs ?? value.feedbackLearningNoteTtlMs ?? 6 * 60 * 60 * 1000,
+}));
 
 export type DingTalkConfig = z.infer<typeof DingTalkConfigSchema>;

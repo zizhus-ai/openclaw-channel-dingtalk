@@ -16,7 +16,7 @@ import {
   getProactiveRiskObservation,
   recordProactiveRiskObservation,
 } from "./proactive-risk-registry";
-import { formatDingTalkErrorPayloadLog } from "./utils";
+import { formatDingTalkErrorPayloadLog, getProxyBypassOption } from "./utils";
 import type {
   AICardInstance,
   AxiosResponse,
@@ -48,6 +48,37 @@ function composeCardContentForAppend(previous: string | undefined, incoming: str
     return `${prev}${incoming}`;
   }
   return `${prev}${incoming}`;
+}
+
+const DINGTALK_TEXT_CHUNK_LIMIT = 3800;
+
+function splitMarkdownChunks(text: string, limit = DINGTALK_TEXT_CHUNK_LIMIT): string[] {
+  if (!text || text.length <= limit) {
+    return [text];
+  }
+  const chunks: string[] = [];
+  let buf = "";
+  const lines = text.split("\n");
+  let inCode = false;
+
+  for (const line of lines) {
+    const fenceCount = (line.match(/```/g) || []).length;
+    if (buf.length + line.length + 1 > limit && buf.length > 0) {
+      if (inCode) {
+        buf += "\n```";
+      }
+      chunks.push(buf);
+      buf = inCode ? "```\n" : "";
+    }
+    buf += (buf ? "\n" : "") + line;
+    if (fenceCount % 2 === 1) {
+      inCode = !inCode;
+    }
+  }
+  if (buf) {
+    chunks.push(buf);
+  }
+  return chunks;
 }
 
 function extractErrorCodeFromResponseData(data: unknown): string | null {
@@ -163,6 +194,7 @@ export async function sendProactiveTextOrMarkdown(
       method: "POST",
       data: payload,
       headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+      ...getProxyBypassOption(config),
     });
     if (options.accountId) {
       deleteProactiveRiskObservation(options.accountId, resolvedTarget);
@@ -273,6 +305,7 @@ export async function sendProactiveMedia(
       method: "POST",
       data: payload,
       headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+      ...getProxyBypassOption(config),
     });
     if (options.accountId) {
       deleteProactiveRiskObservation(options.accountId, resolvedTarget);
@@ -306,7 +339,20 @@ export async function sendProactiveMedia(
       log?.error?.(`[DingTalk] Proactive media response${statusLabel}${proactiveRiskTag}`);
       log?.error?.(formatDingTalkErrorPayloadLog("send.proactiveMedia", err.response.data));
     }
-    return { ok: false, error: err.message };
+
+    // Fallback: ensure user still gets a usable link/path text.
+    const fallback = await sendProactiveTextOrMarkdown(
+      config,
+      target,
+      `📎 媒体发送失败，兜底链接/路径：${mediaPath}`,
+      options,
+    ).catch((fallbackErr: any) => ({ __fallbackError: fallbackErr }));
+
+    if ((fallback as any)?.__fallbackError) {
+      return { ok: false, error: `${err.message}; fallback failed: ${(fallback as any).__fallbackError?.message || "unknown"}` };
+    }
+
+    return { ok: true, data: fallback, messageId: (fallback as any)?.processQueryKey || (fallback as any)?.messageId };
   }
 }
 
@@ -342,39 +388,48 @@ export async function sendBySession(
           method: "POST",
           data: body,
           headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+          ...getProxyBypassOption(config),
         });
         return result.data;
       }
     } else {
+      const mediaHint = options.mediaUrl || options.mediaPath || options.filePath || "(媒体发送失败)";
+      text = `${text}\n\n📎 媒体发送失败，兜底链接/路径：${mediaHint}`.trim();
       log?.warn?.("[DingTalk] Media upload failed, falling back to text description");
     }
   }
 
   // Fallback to text/markdown reply payload.
   const { useMarkdown, title } = detectMarkdownAndExtractTitle(text, options, "Clawdbot 消息");
+  const chunks = splitMarkdownChunks(text, DINGTALK_TEXT_CHUNK_LIMIT);
 
-  let body: SessionWebhookResponse;
-  if (useMarkdown) {
-    let finalText = text;
-    if (options.atUserId) {
-      finalText = `${finalText} @${options.atUserId}`;
+  let lastResult: any = null;
+  for (const [idx, chunk] of chunks.entries()) {
+    let body: SessionWebhookResponse;
+    if (useMarkdown) {
+      let finalText = chunk;
+      if (options.atUserId && idx === chunks.length - 1) {
+        finalText = `${finalText} @${options.atUserId}`;
+      }
+      body = { msgtype: "markdown", markdown: { title: chunks.length > 1 ? `${title} (${idx + 1}/${chunks.length})` : title, text: finalText } };
+    } else {
+      body = { msgtype: "text", text: { content: chunk } };
     }
-    body = { msgtype: "markdown", markdown: { title, text: finalText } };
-  } else {
-    body = { msgtype: "text", text: { content: text } };
-  }
 
-  if (options.atUserId) {
-    body.at = { atUserIds: [options.atUserId], isAtAll: false };
-  }
+    if (options.atUserId && idx === chunks.length - 1) {
+      body.at = { atUserIds: [options.atUserId], isAtAll: false };
+    }
 
-  const result = await axios({
-    url: sessionWebhook,
-    method: "POST",
-    data: body,
-    headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
-  });
-  return result.data;
+    const result = await axios({
+      url: sessionWebhook,
+      method: "POST",
+      data: body,
+      headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+      ...getProxyBypassOption(config),
+    });
+    lastResult = result.data;
+  }
+  return lastResult;
 }
 
 export async function sendMessage(

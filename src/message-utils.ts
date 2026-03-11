@@ -31,18 +31,28 @@ function parseBizCustomActionUrl(url: string | undefined): DingTalkDocMeta | nul
 }
 
 function extractRichTextQuoteParts(
-  richText: Array<Record<string, any>> | undefined,
-): { summary: string; pictureDownloadCode?: string } | null {
+  richText: Array<Record<string, unknown>> | undefined,
+): { summary: string; pictureDownloadCode?: string; pictureDownloadCodes?: string[] } | null {
   if (!Array.isArray(richText) || richText.length === 0) {
     return null;
   }
 
   const textParts: string[] = [];
-  let pictureDownloadCode: string | undefined;
+  const pictureDownloadCodes: string[] = [];
 
   for (const part of richText) {
-    const partType = part.msgType || part.type;
-    const textValue = typeof part.content === "string" ? part.content : part.text;
+    const partType =
+      typeof part.msgType === "string"
+        ? part.msgType
+        : typeof part.type === "string"
+          ? part.type
+          : undefined;
+    const textValue =
+      typeof part.content === "string"
+        ? part.content
+        : typeof part.text === "string"
+          ? part.text
+          : undefined;
 
     if ((partType === "text" || partType === undefined) && textValue) {
       textParts.push(textValue);
@@ -54,13 +64,18 @@ function extractRichTextQuoteParts(
     }
     if (partType === "picture") {
       textParts.push("[图片]");
-      if (!pictureDownloadCode) {
-        pictureDownloadCode = part.downloadCode;
+      if (typeof part.downloadCode === "string" && part.downloadCode.trim()) {
+        pictureDownloadCodes.push(part.downloadCode.trim());
       }
       continue;
     }
     if (partType === "at") {
-      const atName = part.atName || textValue || "某人";
+      const atName =
+        typeof part.atName === "string"
+          ? part.atName
+          : typeof textValue === "string"
+            ? textValue
+            : "某人";
       textParts.push(`@${atName}`);
       continue;
     }
@@ -70,10 +85,16 @@ function extractRichTextQuoteParts(
   }
 
   const summary = textParts.join("").trim();
+  const uniquePictureDownloadCodes = [...new Set(pictureDownloadCodes)];
+  const pictureDownloadCode = uniquePictureDownloadCodes[0];
   if (!summary && !pictureDownloadCode) {
     return null;
   }
-  return { summary, pictureDownloadCode };
+  return {
+    summary,
+    pictureDownloadCode,
+    pictureDownloadCodes: uniquePictureDownloadCodes.length > 0 ? uniquePictureDownloadCodes : undefined,
+  };
 }
 
 /**
@@ -126,9 +147,10 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
       if (repliedMsgType === "richText") {
         const richTextQuote = extractRichTextQuoteParts(content?.richText);
         if (richTextQuote) {
+          const quoteImageCount = richTextQuote.pictureDownloadCodes?.length || 0;
           const prefix =
             richTextQuote.summary && richTextQuote.summary !== "[图片]"
-              ? `[引用消息: "${richTextQuote.summary}"]\n\n`
+              ? `[引用消息: "${richTextQuote.summary}"]${quoteImageCount > 1 ? ` [含${quoteImageCount}张引用图片]` : ""}\n\n`
               : "[引用图片]\n\n";
           return {
             prefix,
@@ -169,7 +191,8 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
 
       // Has msgType but not one we handle — generic fallback.
       if (repliedMsgType) {
-        return { prefix: "[引用了一条消息]\n\n" };
+        const idPart = repliedMsg.msgId ? `，原消息ID: ${repliedMsg.msgId}` : "";
+        return { prefix: `[引用消息不可见: msgType=${repliedMsgType}${idPart}]\n\n` };
       }
 
       // No msgType — backward compat: extract text or richText from content.
@@ -180,13 +203,20 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
       if (content?.richText && Array.isArray(content.richText)) {
         const richTextQuote = extractRichTextQuoteParts(content.richText);
         if (richTextQuote?.summary) {
-          return { prefix: `[引用消息: "${richTextQuote.summary}"]\n\n` };
+          return {
+            prefix: `[引用消息: "${richTextQuote.summary}"]\n\n`,
+            mediaDownloadCode: richTextQuote.pictureDownloadCode,
+            mediaType: richTextQuote.pictureDownloadCode ? "image" : undefined,
+          };
         }
       }
     }
 
     if (textField?.isReplyMsg && !textField?.repliedMsg && data.originalMsgId) {
-      return { prefix: `[这是一条引用消息，原消息ID: ${data.originalMsgId}]\n\n` };
+      return {
+        prefix: `[这是一条引用消息，原消息ID: ${data.originalMsgId}]\n\n`,
+        msgId: data.originalMsgId,
+      };
     }
 
     if (data.quoteMessage) {
@@ -213,7 +243,7 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
   if (msgtype === "richText") {
     const richTextParts = data.content?.richText || [];
     let text = "";
-    let pictureDownloadCode: string | undefined;
+    const pictureDownloadCodes: string[] = [];
     // Keep first image downloadCode while preserving readable text and @mention parts.
     for (const part of richTextParts) {
       if (part.text && (part.type === "text" || part.type === undefined)) {
@@ -222,15 +252,19 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
       if (part.type === "at" && part.atName) {
         text += `@${part.atName} `;
       }
-      if (part.type === "picture" && part.downloadCode && !pictureDownloadCode) {
-        pictureDownloadCode = part.downloadCode;
+      if (part.type === "picture" && part.downloadCode) {
+        pictureDownloadCodes.push(part.downloadCode);
       }
     }
+    const uniquePictureDownloadCodes = [...new Set(pictureDownloadCodes)];
+    const pictureDownloadCode = uniquePictureDownloadCodes[0];
     return {
       text:
         quotedPrefix + (text.trim() || (pictureDownloadCode ? "<media:image>" : "[富文本消息]")),
       mediaPath: pictureDownloadCode,
+      mediaPaths: uniquePictureDownloadCodes.length > 0 ? uniquePictureDownloadCodes : undefined,
       mediaType: pictureDownloadCode ? "image" : undefined,
+      mediaTypes: uniquePictureDownloadCodes.length > 0 ? uniquePictureDownloadCodes.map(() => "image") : undefined,
       messageType: "richText",
       quoted: quoted ?? undefined,
     };
@@ -289,10 +323,10 @@ export function extractMessageContent(data: DingTalkInboundMessage): MessageCont
       quoted: quoted ?? undefined,
     };
   }
-
   if (msgtype === "chatRecord") {
-    const summary = String((data.content as any)?.summary || "").trim();
-    const rawRecord = (data.content as any)?.chatRecord;
+    const content = data.content as Record<string, unknown> | undefined;
+    const summary = typeof content?.summary === "string" ? content.summary.trim() : "";
+    const rawRecord = content?.chatRecord;
     if (
       summary === "[]" ||
       (typeof rawRecord === "string" && rawRecord.trim() === "[]") ||

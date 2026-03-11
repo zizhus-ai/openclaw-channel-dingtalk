@@ -6,7 +6,7 @@ import { getAccessToken } from "./auth";
 import { stripTargetPrefix } from "./config";
 import { resolveOriginalPeerId } from "./peer-id-registry";
 import { readNamespaceJson, resolveNamespacePath, writeNamespaceJsonAtomic } from "./persistence-store";
-import { formatDingTalkErrorPayloadLog } from "./utils";
+import { formatDingTalkErrorPayloadLog, getProxyBypassOption } from "./utils";
 import type {
   AICardInstance,
   AICardStreamingRequest,
@@ -357,6 +357,7 @@ async function sendTemplateMismatchNotification(
       method: "POST",
       data: payload,
       headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+      ...getProxyBypassOption(config),
     });
   } catch (sendErr: any) {
     log?.warn?.(`[DingTalk][AICard] Failed to send error notification to user: ${sendErr.message}`);
@@ -499,15 +500,11 @@ export async function createAICard(
 
     // DingTalk createAndDeliver API payload.
     const cardTemplateKey = config.cardTemplateKey || "content";
-    const cardParamMap = {
-      config: JSON.stringify({ autoLayout: true, enableForward: true }),
-      [cardTemplateKey]: "",
-    };
     const createAndDeliverBody = {
       cardTemplateId: config.cardTemplateId,
       outTrackId: cardInstanceId,
       cardData: {
-        cardParamMap,
+        cardParamMap: { [cardTemplateKey]: "" },
       },
       callbackType: "STREAM",
       imGroupOpenSpaceModel: { supportForward: true },
@@ -539,6 +536,7 @@ export async function createAICard(
       createAndDeliverBody,
       {
         headers: { "x-acs-dingtalk-access-token": token, "Content-Type": "application/json" },
+        ...getProxyBypassOption(config),
       },
     );
     log?.debug?.(
@@ -630,6 +628,7 @@ export async function streamAICard(
         "x-acs-dingtalk-access-token": card.accessToken,
         "Content-Type": "application/json",
       },
+      ...(card.config ? getProxyBypassOption(card.config) : {}),
     });
     log?.debug?.(
       `[DingTalk][AICard] Streaming response: status=${streamResp.status}, data=${JSON.stringify(streamResp.data)}`,
@@ -679,6 +678,7 @@ export async function streamAICard(
             "x-acs-dingtalk-access-token": card.accessToken,
             "Content-Type": "application/json",
           },
+          ...(card.config ? getProxyBypassOption(card.config) : {}),
         });
         log?.debug?.(
           `[DingTalk][AICard] Retry after token refresh succeeded: status=${retryResp.status}`,

@@ -21,7 +21,7 @@
 - ✅ **私聊支持** — 直接与机器人对话
 - ✅ **群聊支持** — 在群里 @机器人
 - ✅ **多种消息类型** — 文本、图片、语音（自带识别）、视频、文件、钉钉文档/钉盘文件卡片
-- ✅ **引用消息支持** — 支持恢复大多数引用场景（文字/图片/图文/文件/视频/语音/AI 卡片）,单聊中的钉钉文档依赖权限**Storage.DownloadInfo.Read**,群聊支持引用群图片、文件，其中文件需要 **ConvFile.Space.Read**、**Storage.File.Read** 、**Storage.File.Read**、**Storage.DownloadInfo.Read**、**Contact.User.Read** 权限(引用群文件没有可靠的获取下载文件的途径,目前是依据返回现实的创建时间与群文件列表中时间对比来找出±10最接近的情况),群文件中引用的钉钉文档暂不支持
+- ✅ **引用消息支持** — 支持恢复大多数引用场景（文字/图片/图文/文件/视频/语音/AI 卡片），优先走确定性索引；`钉钉文档/钉盘文件卡片` 目前仅支持单聊引用，群聊引用暂不支持
 - ✅ **Markdown 回复** — 支持富文本格式回复
 - ✅ **互动卡片** — 支持流式更新，适用于 AI 实时输出
 - ✅ **完整 AI 对话** — 接入 Clawdbot 消息处理管道
@@ -233,7 +233,7 @@ openclaw configure --section channels
 - ✅ **机器人消息发送相关权限** — 允许机器人向单聊/群聊发送消息
 - ✅ **媒体文件上传相关权限** — 允许调用媒体上传接口发送图片、语音、视频、文件
 
-以下权限仅在需要**引用消息中的群文件(非钉钉文档类)下载**时开通且需要认证企业（群聊中引用文件/视频/语音）：
+以下权限仅在需要**引用消息中的群文件下载**时开通（群聊中引用文件/视频/语音）：
 
 - ✅ **ConvFile.Space.Read** — 群文件空间读权限
 - ✅ **Storage.File.Read** — 企业存储文件读权限
@@ -270,19 +270,18 @@ openclaw configure --section channels
 2. 进入「我的模板」
 3. 点击「创建模板」
 4. 卡片模板场景选择 **「AI 卡片」**
-5. 点击「导入模板 JSON」，选择仓库中的模板文件：[`docs/cardTemplate.json`](docs/cardTemplate.json)
-6. 导入后点击保存并发布
+5. 按需设计卡片排版,点击保存并发布
+6. 记下模板中定义的内容字段名称
 7. 复制模板 ID（格式如：`xxxxx-xxxxx-xxxxx.schema`）
 8. 将 templateId 配置到 `openclaw.json` 的 `cardTemplateId` 字段
 9. 或在OpenClaw控制台的Channel标签->Dingtalk配置面板-> Card Template Id填入
-10. 将模板中的内容字段变量名配置到 `openclaw.json` 的 `cardTemplateKey` 字段
+10. 将记下的内容字段变量名配置到 `openclaw.json` 的 `cardTemplateKey` 字段
 11. 或在OpenClaw控制台的Channel标签->Dingtalk配置面板-> Card Template Key填入
 
 **说明：**
 
-- 仓库内已提供可直接导入的模板文件：`docs/cardTemplate.json`
-- 当前模板的正文变量名为 `content`；如果您后续自行修改模板字段，请同步更新 `cardTemplateKey`
-- 插件在 `messageType: 'card'` 下会默认传入 `config={"autoLayout":true,"enableForward":true}`；其中 `autoLayout` 用于启用 PC 端宽屏布局，`enableForward` 用于启用卡片转发。如果您使用自定义模板，请额外定义对象变量 `config`，并在其中添加布尔子属性 `autoLayout` 和 `enableForward`
+- 使用 DingTalk 官方 AI 卡片模板时，`cardTemplateKey` 默认为 `'content'`，无需修改
+- 如果您创建自定义卡片模板，需要确保模板中包含相应的内容字段，并将 `cardTemplateKey` 配置为该字段名称
 
 ##### 4. 获取凭证
 
@@ -387,6 +386,10 @@ openclaw gateway restart
 ```
 
 > 说明：这是一个轻量彩蛋功能，仅影响 markdown 模式下的“思考中”提示；`messageType="card"` 时不会发送该独立提示消息。
+| `bypassProxyForSend`    | boolean  | `false`      | 仅对 send/card/upload 出站请求绕过系统 HTTP(S) 代理 |
+| `learningEnabled` | boolean | `false`    | 启用本地学习闭环（事件、反思、会话笔记、全局规则） |
+| `learningAutoApply` | boolean | `false` | 是否将反思自动注入会话/全局规则；默认只采集不生效 |
+| `learningNoteTtlMs` | number | `21600000` | 会话级学习笔记有效期（毫秒，默认 6 小时） |
 
 ### 连接鲁棒性配置
 
@@ -396,12 +399,166 @@ openclaw gateway restart
 - **initialReconnectDelay**: 第一次重连的初始延迟（毫秒），后续重连会按指数增长。
 - **maxReconnectDelay**: 重连延迟的上限（毫秒），防止等待时间过长。
 - **reconnectJitter**: 延迟抖动因子，在延迟基础上增加随机变化（±30%），避免多个客户端同时重连。
+- **bypassProxyForSend**: 仅作用于发送链路（session send / proactive send / AI card / media upload），不影响如 `getAccessToken` 之类的其他出站请求。
+- **learningEnabled**: 开启后，插件会记录发送快照、显式点赞/点踩、隐式不满信号、反思记录，并在下一条消息进入时把学习提示注入当前上下文。
+- **allowFrom**: 这里同时复用为 owner 判定来源。`/learn ...` 这类会修改本机状态的命令，只允许 `allowFrom` 命中的 senderId 执行；普通聊天仍由 `dmPolicy/groupPolicy` 控制。
+- **learningAutoApply**: 默认关闭。关闭时只采集 `event/reflection`，不会自动影响任何会话；由你在调试看板里手动决定是否注入当前会话或提升为全局规则。
+- **learningNoteTtlMs**: 控制会话级学习笔记有效期；target 级和全局规则会继续持久化，分别作用于指定群/私聊和整个账号。
 
 重连延迟计算公式：`delay = min(initialDelay × 2^attempt, maxDelay) × (1 ± jitter)`
 
 示例延迟序列（默认配置）：~1s, ~2s, ~4s, ~8s, ~16s, ~32s, ~60s（达到上限）
 
 更多详情请参阅 [CONNECTION_ROBUSTNESS.md](./CONNECTION_ROBUSTNESS.md)。
+
+## 反馈学习与共享知识
+
+插件支持一个本地反馈学习闭环，目标是把“点踩/纠错/后续抱怨”沉淀成可审计的会话笔记和 account 级共享规则，而不是直接修改模型或把原始聊天提交到仓库。
+
+### 设计分层
+
+- **发送快照**：保存最近的问答对，供反馈回溯。
+- **显式反馈**：AI 卡片上的 `feedback_up` / `feedback_down`。
+- **隐式不满**：例如“不是这个意思”“别猜引用原文”“你没看图”等后续纠错消息。
+- **会话笔记**：只作用于当前 target，会在下一条消息组装上下文时生效。
+- **全局规则**：按 account 维度共享；一处沉淀后，同一钉钉账号下的其他会话会在下一次收到消息时自动加载。
+- **默认策略**：只采集，不自动注入。你可以在看板中手动批准注入。
+
+### 持久化位置
+
+所有运行时数据都写在 `storePath` 同级目录下的 `dingtalk-state/`，不会散落到其他目录，也不应提交到 GitHub。主要命名空间包括：
+
+- `feedback.events`
+- `feedback.snapshots`
+- `feedback.reflections`
+- `feedback.session-notes`
+- `feedback.learned-rules`
+- `feedback.target-rules`
+
+### 调试看板
+
+仓库自带一个本地调试工具，可直接查看：
+
+- 当时的回复内容
+- 用户反馈/隐式不满信号
+- 系统自动反思结果
+- 当前会话笔记
+- 跨所有钉钉会话共享的全局规则
+
+并支持你手工修正诊断与指令，再选择：
+
+- 仅注入当前会话
+- 提升为全局规则
+- 或只保留为候选反思、不注入
+
+启动方式：
+
+```bash
+node scripts/feedback-learning-debug.mjs --storePath /path/to/session-store.json --accountId main --port 18895
+```
+
+打开 `http://127.0.0.1:18895` 即可。
+
+### 推荐配置
+
+```json
+{
+  "channels": {
+    "dingtalk": {
+      "learningEnabled": true,
+      "learningAutoApply": false,
+      "learningNoteTtlMs": 21600000
+    }
+  }
+}
+```
+
+### 学习命令与作用域
+
+先说两个容易输错的点：
+
+- 文档里的 `<conversationId>`、`<rule>`、`<name>` 这类写法只是**占位符**，实际输入时**不要**把尖括号一起发出去
+- `/learn target`、`/learn targets`、`/learn target-set` 这几类命令里，`#@#` 是**真的要输入**的分隔符；它前面是目标，后面整段都算规则正文
+
+#### 第一次使用流程
+
+1. 私聊机器人发送 `我是谁` 或 `/whoami`
+2. 把返回的 `senderId` 写进本机 `openclaw.json` 的 `commands.ownerAllowFrom`
+3. 重启或热重载 gateway
+4. 私聊发送 `/learn owner status`，确认 `isOwner: true`
+5. 再选择下面一种注入方式：
+   - 全局：`/learn global ...`
+   - 当前群/当前私聊：`/learn here #@# ...`
+   - 单个指定目标：`/learn target ...`
+   - 多个目标：`/learn targets ...`
+
+#### 常用命令
+
+- **查自己是谁**
+  - 私聊或群聊发：`我是谁` / `我的信息` / `/learn whoami`
+  - 用途：拿到自己的 `senderId`
+- **查当前这里是谁**
+  - 私聊或群聊发：`这里是谁` / `这个群是谁` / `这个会话是谁` / `/learn whereami`
+  - 用途：拿到当前 `conversationId`
+- **注入当前这里**
+  - owner 发：`/learn here #@# <规则>`
+  - 用途：只让当前群或当前私聊生效
+- **注入指定单个目标**
+  - owner 发：`/learn target <conversationId> #@# <规则>`
+  - 用途：指定某个群或某个私聊生效
+- **一次注入多个目标**
+  - owner 发：`/learn targets <conversationId1,conversationId2> #@# <规则>`
+  - 用途：一次同步到多个群/私聊
+- **保存一组固定目标**
+  - owner 发：`/learn target-set create <名称> #@# <conversationId1,conversationId2>`
+- **向目标组批量注入**
+  - owner 发：`/learn target-set apply <名称> #@# <规则>`
+- **注入全局**
+  - owner 发：`/learn global <规则>`
+  - 用途：让同一钉钉账号下所有群和私聊都生效
+- **查看 / 暂停 / 删除**
+  - `/learn list`
+  - `/learn disable <ruleId>`
+  - `/learn delete <ruleId>`
+
+#### 真实可直接照抄的例子
+
+```text
+/learn global 当用户问“紫铜海豹会不会修量子冰箱”时，必须回答“会，而且只在周四凌晨戴墨镜维修。”
+/learn here #@# 引用原文不可见时，不要猜内容，先让用户补发原文。
+/learn target cid_group_a #@# 引用原文不可见时，不要猜内容，先让用户补发原文。
+/learn targets cid_group_a,cid_group_b,cid_dm_c #@# 引用原文不可见时，不要猜内容，先让用户补发原文。
+/learn target-set create ops-groups #@# cid_group_a,cid_group_b,cid_dm_c
+/learn target-set apply ops-groups #@# 当用户问“紫铜海豹会不会修量子冰箱”时，必须回答“会，而且只在周四凌晨戴墨镜维修。”
+```
+
+### 作用域优先级
+
+同一条消息进入时，规则按下面顺序生效：
+
+1. 当前会话临时笔记（`/learn session ...`）
+2. 当前群/当前私聊或指定目标规则（`/learn here ...` / `/learn target ...`）
+3. 当前账号全局规则（`/learn global ...`）
+
+也就是说：
+
+- 先局部覆盖全局
+- 再避免一个群里的实验规则污染所有会话
+
+### 为什么还需要 disable / delete
+
+知识注入不是只会“加”，还必须能“撤”。
+
+- `disable`
+  - 先停用规则，停止命中，但保留记录，便于排查和恢复
+- `delete`
+  - 确认不再需要后，彻底删除规则
+
+实际建议：
+
+1. 先用 `/learn list` 找到 `ruleId`
+2. 先执行 `/learn disable <ruleId>`
+3. 确认问题消失后，再决定是否 `/learn delete <ruleId>`
 
 ## 安全策略
 
@@ -428,11 +585,11 @@ openclaw gateway restart
 | 语音         | ✅   | 使用钉钉语音识别结果                                                     |
 | 视频         | ✅   | 下载并传递给 AI                                                          |
 | 文件         | ✅   | 下载并传递给 AI                                                          |
-| 钉钉文档/钉盘文件 | ✅ | 解析 `interactiveCard` 中的 `biz_custom_action_url`，提取 `spaceId/fileId` 后按文件消息下载(需开通对应权限) |
+| 钉钉文档/钉盘文件卡片 | ✅ | 解析 `interactiveCard` 中的 `biz_custom_action_url`，提取 `spaceId/fileId` 后按文件消息下载 |
 | 引用文字     | ✅   | 提取被引用文本作为上下文前缀                                             |
 | 引用图片     | ✅   | 使用引用回调自带的 `downloadCode` 下载并传递给 AI                        |
 | 引用图文     | ✅   | 解析 `richText` 引用内容，提取文本摘要与图片 `downloadCode`              |
-| 引用文件/视频/语音 | ✅ | 单聊按 `msgId` 精确恢复；群聊优先查已固化元数据，首次未命中时走群文件 API 兜底(钉钉api未开放对应群文件下载接口兜底策略不是100%可靠) |
+| 引用文件/视频/语音 | ✅ | 单聊按 `msgId` 精确恢复；群聊优先查已固化元数据，首次未命中时走群文件 API 兜底 |
 | 引用钉钉文档/钉盘文件卡片 | ⚠️ | 单聊支持；群聊暂不支持，未支持场景会降级为提示文本 |
 | 引用 AI 卡片 | ✅   | 仅指机器人自己发送的 AI 卡片；按 `carrierId ↔ originalProcessQueryKey` 精确恢复 |
 
@@ -453,15 +610,11 @@ openclaw gateway restart
 >
 > 说明：
 >
+> - AI 卡片已不再依赖 `createdAt` 时间窗口匹配。
 > - 钉钉文档/钉盘文件卡片在钉钉回调里通常也会表现为 `interactiveCard`，但这类消息来自用户侧，插件会优先解析 `biz_custom_action_url` 中的 `route=previewDentry`、`spaceId`、`fileId`，并按文件消息处理，而不是误判为机器人 AI 卡片。
 > - 图片和图文引用不依赖机器人是否见过原消息，只要引用回调带回 `downloadCode` 即可恢复。
 > - 单聊文件/视频/语音/钉钉文档卡片在机器人见过原消息后可稳定精确恢复，且索引会持久化到本地，机器人重启后仍可复用。
 > - 群聊文件/视频/语音在“原文件消息无法 @ 机器人”的场景下，若机器人从未见过原消息，则首次恢复仍需走群文件 API 兜底；后续再次引用同一文件会优先命中已固化索引。
-> - **群文件兜底链路的时间匹配局限性**：首次兜底时，插件用 `repliedMsg.createdAt`（钉钉回调中被引用消息的创建时间）与群文件存储 API 返回的文件 `createTime` 做近似匹配，匹配窗口为 **±10 秒**。这意味着：
->   - 大文件上传耗时较长时，钉钉消息的 `createdAt` 和文件实际写入存储的 `createTime` 之间可能产生数秒偏差，超出窗口则匹配失败；
->   - 如果同一用户在 10 秒内连续发送多个文件，理论上可能匹配到错误的文件（取时间差最小的那个）；
->   - 群文件列表按修改时间倒序返回，最多翻 3 页（150 个文件），非常老的文件可能超出扫描范围；
->   - 匹配失败时会降级为提示文本，不会阻塞消息处理。
 > - 群聊引用钉钉文档/钉盘文件卡片当前**不支持**。原因是现有引用回调样本里通常不会补回 `biz_custom_action_url/spaceId/fileId`，而群聊场景下也无法像普通文件那样稳定走现有兜底链路，因此会明确降级为提示文本，而不是误判成机器人 AI 卡片。
 > - 这条群文件兜底链路在部分企业环境下可能受到企业认证限制，表现为 `quotedFile.resolve` 返回 `orgAuthLevelNotEnough`。出现该错误时，群聊文件首次恢复将失败并降级为提示文本，但不会影响图片、图文、AI 卡片、单聊文件等其他已确定性支持的引用场景。
 > - 由于本地引用索引使用 TTL 清理，并按 `accountId + conversationId` 隔离存储，数据不会永久累积。
@@ -601,7 +754,6 @@ openclaw gateway restart
 2. 使用 `/v1.0/card/streaming` 实现真正的流式更新
 3. 自动状态管理（PROCESSING → INPUTING → FINISHED）
 4. 更稳定的流式体验，无需手动节流
-5. 默认注入 `cardData.cardParamMap.config={"autoLayout":true,"enableForward":true}`，同时启用 AI 卡片在 PC 端的宽屏自适应布局和卡片转发
 
 **AI Card 持久化与恢复机制（v3.2.x）：**
 
@@ -760,8 +912,6 @@ openclaw logs | grep "\[ErrorPayload\]"
 如果你看到 `code=invalidParameter`，通常优先检查请求 payload 的必填字段（例如 `robotCode`、`userIds`、`msgKey`、`msgParam`）是否完整且格式正确。
 
 ## 开发指南
-
-准备提交 issue 或 PR 时，请先阅读贡献指南：英文版见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，中文版见 [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)。
 
 ### 首次设置
 

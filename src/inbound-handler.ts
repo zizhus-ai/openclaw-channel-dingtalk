@@ -12,6 +12,20 @@ import {
 import { resolveGroupConfig } from "./config";
 import { formatGroupMembers, noteGroupMember } from "./group-members-store";
 import { setCurrentLogger } from "./logger-context";
+import {
+  formatLearnAppliedReply,
+  formatLearnCommandHelp,
+  formatLearnDeletedReply,
+  formatLearnDisabledReply,
+  formatLearnListReply,
+  formatOwnerOnlyDeniedReply,
+  formatOwnerStatusReply,
+  formatTargetSetSavedReply,
+  formatWhereAmIReply,
+  formatWhoAmIReply,
+  isLearningOwner,
+  parseLearnCommand,
+} from "./learning-command-service";
 import { extractMessageContent } from "./message-utils";
 import { registerPeerId } from "./peer-id-registry";
 import {
@@ -25,8 +39,23 @@ import { AICardStatus } from "./types";
 import { acquireSessionLock } from "./session-lock";
 import { cacheInboundDownloadCode, getCachedDownloadCode } from "./quoted-msg-cache";
 import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
+import classifySentenceWithEmoji from "./classifyWithEmoji";
+import {
+  applyManualTargetLearningRule,
+  applyManualTargetsLearningRule,
+  applyManualGlobalLearningRule,
+  applyManualSessionLearningNote,
+  applyTargetSetLearningRule,
+  buildLearningContextBlock,
+  createOrUpdateTargetSet,
+  deleteManualRule,
+  disableManualRule,
+  isFeedbackLearningEnabled,
+  listLearningTargetSets,
+  listScopedLearningRules,
+  resolveManualForcedReply,
+} from "./feedback-learning-service";
 import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
-import classifySentenceWithEmoji from './classifyWithEmoji';
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
 const DEFAULT_THINKING_MESSAGE = "🤔 思考中，请稍候...";
@@ -333,7 +362,280 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   });
 
   const to = isDirect ? senderId : groupId;
-
+  const parsedLearnCommand = parseLearnCommand(content.text);
+  const isOwner = isLearningOwner({
+    cfg,
+    config: dingtalkConfig,
+    senderId,
+    rawSenderId: data.senderId,
+  });
+  if (isDirect && parsedLearnCommand.scope === "whoami") {
+    await sendBySession(
+      dingtalkConfig,
+      sessionWebhook,
+      formatWhoAmIReply({
+        senderId,
+        rawSenderId: data.senderId,
+        senderStaffId: data.senderStaffId,
+        isOwner,
+      }),
+      { log },
+    );
+    return;
+  }
+  if (parsedLearnCommand.scope === "whereami") {
+    await sendBySession(
+      dingtalkConfig,
+      sessionWebhook,
+      formatWhereAmIReply({
+        conversationId: data.conversationId,
+        conversationType: isDirect ? "dm" : "group",
+      }),
+      { log },
+    );
+    return;
+  }
+  if (isDirect && parsedLearnCommand.scope === "owner-status") {
+    await sendBySession(
+      dingtalkConfig,
+      sessionWebhook,
+      formatOwnerStatusReply({
+        senderId,
+        rawSenderId: data.senderId,
+        isOwner,
+      }),
+      { log },
+    );
+    return;
+  }
+  if (parsedLearnCommand.scope === "help") {
+    await sendBySession(dingtalkConfig, sessionWebhook, formatLearnCommandHelp(), { log });
+    return;
+  }
+  if (
+    (parsedLearnCommand.scope === "global"
+      || parsedLearnCommand.scope === "session"
+      || parsedLearnCommand.scope === "here"
+      || parsedLearnCommand.scope === "target"
+      || parsedLearnCommand.scope === "targets"
+      || parsedLearnCommand.scope === "list"
+      || parsedLearnCommand.scope === "disable"
+      || parsedLearnCommand.scope === "delete"
+      || parsedLearnCommand.scope === "target-set-create"
+      || parsedLearnCommand.scope === "target-set-apply")
+    && !isOwner
+  ) {
+    await sendBySession(dingtalkConfig, sessionWebhook, formatOwnerOnlyDeniedReply(), { log });
+    return;
+  }
+  if (isOwner) {
+    if (parsedLearnCommand.scope === "global" && parsedLearnCommand.instruction) {
+      const applied = applyManualGlobalLearningRule({
+        storePath: accountStorePath,
+        accountId,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnAppliedReply({
+          scope: "global",
+          instruction: parsedLearnCommand.instruction,
+          ruleId: applied?.ruleId,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "session" && parsedLearnCommand.instruction) {
+      applyManualSessionLearningNote({
+        storePath: accountStorePath,
+        accountId,
+        targetId: data.conversationId,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnAppliedReply({
+          scope: "session",
+          instruction: parsedLearnCommand.instruction,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "here" && parsedLearnCommand.instruction) {
+      const applied = applyManualTargetLearningRule({
+        storePath: accountStorePath,
+        accountId,
+        targetId: data.conversationId,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnAppliedReply({
+          scope: "target",
+          targetId: data.conversationId,
+          instruction: parsedLearnCommand.instruction,
+          ruleId: applied?.ruleId,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "target" && parsedLearnCommand.targetId && parsedLearnCommand.instruction) {
+      const applied = applyManualTargetLearningRule({
+        storePath: accountStorePath,
+        accountId,
+        targetId: parsedLearnCommand.targetId,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnAppliedReply({
+          scope: "target",
+          targetId: parsedLearnCommand.targetId,
+          instruction: parsedLearnCommand.instruction,
+          ruleId: applied?.ruleId,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "targets" && parsedLearnCommand.targetIds?.length && parsedLearnCommand.instruction) {
+      const applied = applyManualTargetsLearningRule({
+        storePath: accountStorePath,
+        accountId,
+        targetIds: parsedLearnCommand.targetIds,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnAppliedReply({
+          scope: "targets",
+          targetIds: parsedLearnCommand.targetIds,
+          instruction: parsedLearnCommand.instruction,
+          ruleId: applied[0]?.ruleId,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "target-set-create" && parsedLearnCommand.setName && parsedLearnCommand.targetIds?.length) {
+      const saved = createOrUpdateTargetSet({
+        storePath: accountStorePath,
+        accountId,
+        name: parsedLearnCommand.setName,
+        targetIds: parsedLearnCommand.targetIds,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        saved
+          ? formatTargetSetSavedReply({
+            setName: parsedLearnCommand.setName,
+            targetIds: parsedLearnCommand.targetIds,
+          })
+          : "目标组保存失败，请检查名称和目标列表。",
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "target-set-apply" && parsedLearnCommand.setName && parsedLearnCommand.instruction) {
+      const applied = applyTargetSetLearningRule({
+        storePath: accountStorePath,
+        accountId,
+        name: parsedLearnCommand.setName,
+        instruction: parsedLearnCommand.instruction,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        applied.length > 0
+          ? formatLearnAppliedReply({
+            scope: "target-set",
+            setName: parsedLearnCommand.setName,
+            targetIds: applied.map((item) => item.targetId),
+            instruction: parsedLearnCommand.instruction,
+            ruleId: applied[0]?.ruleId,
+          })
+          : `未找到目标组 \`${parsedLearnCommand.setName}\`，或该目标组为空。`,
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "list") {
+      const rules = listScopedLearningRules({ storePath: accountStorePath, accountId })
+        .slice(0, 20)
+        .map((rule) => {
+          const scope = rule.scope === "target" ? `target(${rule.targetId})` : "global";
+          const status = rule.enabled ? "enabled" : "disabled";
+          return `- [${scope}] ${rule.ruleId} (${status}) => ${rule.instruction}`;
+        });
+      const targetSets = listLearningTargetSets({ storePath: accountStorePath, accountId })
+        .slice(0, 10)
+        .map((targetSet) => `- [target-set] ${targetSet.name} => ${targetSet.targetIds.join(", ")}`);
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnListReply([...rules, ...targetSets]),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "disable" && parsedLearnCommand.ruleId) {
+      const result = disableManualRule({
+        storePath: accountStorePath,
+        accountId,
+        ruleId: parsedLearnCommand.ruleId,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnDisabledReply({
+          ruleId: parsedLearnCommand.ruleId,
+          existed: result.existed,
+          scope: result.scope,
+          targetId: result.targetId,
+        }),
+        { log },
+      );
+      return;
+    }
+    if (parsedLearnCommand.scope === "delete" && parsedLearnCommand.ruleId) {
+      const result = deleteManualRule({
+        storePath: accountStorePath,
+        accountId,
+        ruleId: parsedLearnCommand.ruleId,
+      });
+      await sendBySession(
+        dingtalkConfig,
+        sessionWebhook,
+        formatLearnDeletedReply({
+          ruleId: parsedLearnCommand.ruleId,
+          existed: result.existed,
+          scope: result.scope,
+          targetId: result.targetId,
+        }),
+        { log },
+      );
+      return;
+    }
+  }
+  const manualForcedReply = resolveManualForcedReply({
+    storePath: accountStorePath,
+    accountId,
+    targetId: data.conversationId,
+    content,
+  });
+  if (manualForcedReply) {
+    await sendBySession(dingtalkConfig, sessionWebhook, manualForcedReply, { log });
+    return;
+  }
   // 3) Select response mode (card vs markdown).
   // Card creation runs BEFORE media download so the user sees immediate visual
   // feedback while large files are still being downloaded.
@@ -585,6 +887,14 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     mediaPath && /<media:[^>]+>/.test(content.text)
       ? `${content.text}\n[media_path: ${mediaPath}]\n[media_type: ${mediaType || "unknown"}]`
       : content.text;
+  const learningEnabled = isFeedbackLearningEnabled(dingtalkConfig);
+  const learningContextBlock = buildLearningContextBlock({
+    enabled: learningEnabled,
+    storePath: accountStorePath,
+    accountId,
+    targetId: data.conversationId,
+    content,
+  });
   const envelopeOptions = rt.channel.reply.resolveEnvelopeFormatOptions(cfg);
   const previousTimestamp = rt.channel.session.readSessionUpdatedAt({
     storePath,
@@ -593,11 +903,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
 
   const groupConfig = !isDirect ? resolveGroupConfig(dingtalkConfig, groupId) : undefined;
   // GroupSystemPrompt is injected every turn (not only first-turn intro).
-  const groupSystemPrompt = !isDirect
+  const groupSystemPromptParts = !isDirect
     ? [`DingTalk group context: conversationId=${groupId}`, groupConfig?.systemPrompt?.trim()]
-        .filter(Boolean)
-        .join("\n")
-    : undefined;
+    : [];
+  const extraSystemPrompt =
+    [...groupSystemPromptParts, learningContextBlock].filter(Boolean).join("\n\n") || undefined;
 
   if (!isDirect) {
     noteGroupMember(storePath, groupId, senderId, senderName);
@@ -637,7 +947,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     MediaType: mediaType,
     MediaUrl: mediaPath,
     GroupMembers: groupMembers,
-    GroupSystemPrompt: groupSystemPrompt,
+    GroupSystemPrompt: extraSystemPrompt,
     GroupChannel: isDirect ? undefined : route.sessionKey,
     CommandAuthorized: commandAuthorized,
     OriginatingChannel: "dingtalk",
@@ -664,10 +974,8 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     // 4) Optional "thinking..." feedback (markdown mode only).
     if (dingtalkConfig.showThinking !== false) {
       let thinkingText = (dingtalkConfig.thinkingMessage || "").trim() || DEFAULT_THINKING_MESSAGE;
-      // 🌟 当配置为 "emoji" 时，根据用户输入情绪返回随机颜文字
       if (thinkingText === "emoji") {
-        const resultEmoji = classifySentenceWithEmoji(content.text);
-        thinkingText = resultEmoji.emoji;
+        thinkingText = classifySentenceWithEmoji(content.text).emoji;
       }
       if (useCardMode && currentAICard) {
         log?.debug?.(

@@ -46,6 +46,28 @@ describe('DingTalkConfigSchema', () => {
         expect(parsed.accounts.main?.mediaUrlAllowlist).toEqual(['192.168.1.23', 'files.internal.example']);
     });
 
+    it('keeps keepAlive undefined when omitted', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+        }) as { keepAlive?: boolean };
+
+        expect(parsed.keepAlive).toBeUndefined();
+    });
+
+    it('keeps account-level keepAlive undefined when omitted', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            accounts: {
+                main: {
+                    clientId: 'id',
+                    clientSecret: 'secret',
+                },
+            },
+        }) as { accounts: Record<string, { keepAlive?: boolean }> };
+
+        expect(parsed.accounts.main?.keepAlive).toBeUndefined();
+    });
+
     it('accepts custom aicardDegradeMs for account config', () => {
         const parsed = DingTalkConfigSchema.parse({
             accounts: {
@@ -58,5 +80,33 @@ describe('DingTalkConfigSchema', () => {
         }) as { accounts: Record<string, { aicardDegradeMs?: number }> };
 
         expect(parsed.accounts.main?.aicardDegradeMs).toBe(120000);
+    });
+
+    it('accepts learning config and default auto-apply/note ttl', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            learningEnabled: true,
+            allowFrom: ['owner-test-id'],
+        }) as { learningEnabled?: boolean; allowFrom?: string[]; learningAutoApply?: boolean; learningNoteTtlMs?: number };
+
+        expect(parsed.learningEnabled).toBe(true);
+        expect(parsed.allowFrom).toEqual(['owner-test-id']);
+        expect(parsed.learningAutoApply).toBe(false);
+        expect(parsed.learningNoteTtlMs).toBe(6 * 60 * 60 * 1000);
+    });
+
+    it('keeps backward compatibility for legacy feedback learning keys', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            feedbackLearningEnabled: true,
+            feedbackLearningAutoApply: true,
+            feedbackLearningNoteTtlMs: 120000,
+        }) as { learningEnabled?: boolean; learningAutoApply?: boolean; learningNoteTtlMs?: number };
+
+        expect(parsed.learningEnabled).toBe(true);
+        expect(parsed.learningAutoApply).toBe(true);
+        expect(parsed.learningNoteTtlMs).toBe(120000);
     });
 });

@@ -90,10 +90,7 @@ describe('card-service', () => {
         expect(card?.processQueryKey).toBe('carrier_1');
         expect(mockedAxios.post).toHaveBeenCalledTimes(1);
         const body = mockedAxios.post.mock.calls[0]?.[1];
-        expect(body.cardData?.cardParamMap).toEqual({
-            config: '{"autoLayout":true,"enableForward":true}',
-            content: '',
-        });
+        expect(body.cardData?.cardParamMap).toEqual({ content: '' });
         expect(body.imGroupOpenDeliverModel).toEqual({ robotCode: 'id' });
     });
 
@@ -108,6 +105,24 @@ describe('card-service', () => {
         const body = mockedAxios.post.mock.calls[0]?.[1];
         expect(body.openSpaceId).toBe('dtv1.card//IM_ROBOT.manager123');
         expect(body.imRobotOpenDeliverModel).toEqual({ spaceType: 'IM_ROBOT', robotCode: 'robot_1' });
+    });
+
+    it('createAICard bypasses proxy when configured', async () => {
+        mockedAxios.post.mockResolvedValueOnce({ status: 200, data: { ok: true } });
+
+        await createAICard(
+            {
+                clientId: 'id',
+                clientSecret: 'sec',
+                cardTemplateId: 'tmpl.schema',
+                robotCode: 'robot_1',
+                bypassProxyForSend: true,
+            } as any,
+            'manager123'
+        );
+
+        const requestConfig = mockedAxios.post.mock.calls[0]?.[2];
+        expect(requestConfig?.proxy).toBe(false);
     });
 
     it('createAICard returns null when templateId is missing', async () => {
