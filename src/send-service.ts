@@ -9,7 +9,7 @@ import {
 import { stripTargetPrefix } from "./config";
 import { getLogger } from "./logger-context";
 import { getVoiceDurationMs, uploadMedia as uploadMediaUtil } from "./media-utils";
-import { detectMarkdownAndExtractTitle } from "./message-utils";
+import { convertMarkdownTablesToPlainText, detectMarkdownAndExtractTitle } from "./message-utils";
 import { resolveOriginalPeerId } from "./peer-id-registry";
 import {
   deleteProactiveRiskObservation,
@@ -164,7 +164,8 @@ export async function sendProactiveTextOrMarkdown(
     ? "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
     : "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
 
-  const { useMarkdown, title } = detectMarkdownAndExtractTitle(text, options, "OpenClaw 提醒");
+  const normalizedText = convertMarkdownTablesToPlainText(text);
+  const { useMarkdown, title } = detectMarkdownAndExtractTitle(normalizedText, options, "OpenClaw 提醒");
 
   log?.debug?.(
     `[DingTalk] Sending proactive message to ${isGroup ? "group" : "user"} ${resolvedTarget} with title "${title}"${proactiveRiskTag}`,
@@ -173,8 +174,8 @@ export async function sendProactiveTextOrMarkdown(
   // DingTalk proactive API uses message templates (sampleMarkdown / sampleText).
   const msgKey = useMarkdown ? "sampleMarkdown" : "sampleText";
   const msgParam = useMarkdown
-    ? JSON.stringify({ title, text })
-    : JSON.stringify({ content: text });
+    ? JSON.stringify({ title, text: normalizedText })
+    : JSON.stringify({ content: normalizedText });
 
   const payload: ProactiveMessagePayload = {
     robotCode: config.robotCode || config.clientId,
@@ -400,8 +401,9 @@ export async function sendBySession(
   }
 
   // Fallback to text/markdown reply payload.
-  const { useMarkdown, title } = detectMarkdownAndExtractTitle(text, options, "Clawdbot 消息");
-  const chunks = splitMarkdownChunks(text, DINGTALK_TEXT_CHUNK_LIMIT);
+  const normalizedText = convertMarkdownTablesToPlainText(text);
+  const { useMarkdown, title } = detectMarkdownAndExtractTitle(normalizedText, options, "Clawdbot 消息");
+  const chunks = splitMarkdownChunks(normalizedText, DINGTALK_TEXT_CHUNK_LIMIT);
 
   let lastResult: any = null;
   for (const [idx, chunk] of chunks.entries()) {

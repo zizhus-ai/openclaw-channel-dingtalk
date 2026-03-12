@@ -13,6 +13,7 @@ vi.mock('axios', () => {
     };
 });
 
+import { convertMarkdownTablesToPlainText } from '../../src/message-utils';
 import { sendBySession, sendProactiveTextOrMarkdown } from '../../src/send-service';
 import type { DingTalkConfig } from '../../src/types';
 
@@ -81,5 +82,49 @@ describe('message payload transform', () => {
         expect(JSON.parse(request.data.msgParam)).toEqual({ content: 'plain text' });
         expect(request.data.openConversationId).toBe('cidA1B2C3');
         expect(request.data.userIds).toBeUndefined();
+    });
+
+    it('converts markdown tables to plain text before session send', async () => {
+        mockedAxios.mockResolvedValue({ data: { success: true } });
+
+        await sendBySession(config, 'https://example-session-webhook', '# 报表\n| 姓名 | 分数 |\n| --- | --- |\n| 张三 | 90 |', {
+            useMarkdown: true,
+        });
+
+        const request = mockedAxios.mock.calls[0]?.[0] as {
+            data: {
+                markdown?: { title: string; text: string };
+            };
+        };
+
+        expect(request.data.markdown).toEqual({
+            title: '报表',
+            text: '# 报表\n姓名 | 分数\n张三 | 90',
+        });
+    });
+
+    it('converts markdown tables to plain text before proactive markdown send', async () => {
+        mockedAxios.mockResolvedValue({ data: { processQueryKey: 'q_table' } });
+
+        await sendProactiveTextOrMarkdown(config, 'cidA1B2C3', '# 周报\n| 项目 | 状态 |\n| --- | --- |\n| PR-295 | 处理中 |');
+
+        const request = mockedAxios.mock.calls[0]?.[0] as {
+            data: {
+                msgKey: string;
+                msgParam: string;
+            };
+        };
+
+        expect(request.data.msgKey).toBe('sampleMarkdown');
+        expect(JSON.parse(request.data.msgParam)).toEqual({
+            title: '周报',
+            text: '# 周报\n项目 | 状态\nPR-295 | 处理中',
+        });
+    });
+
+    it('keeps markdown tables inside code fences untouched', () => {
+        const input = '```md\n| a | b |\n| --- | --- |\n| 1 | 2 |\n```';
+
+        expect(convertMarkdownTablesToPlainText(input)).toBe(input);
     });
 });

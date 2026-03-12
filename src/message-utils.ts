@@ -121,6 +121,76 @@ export function detectMarkdownAndExtractTitle(
   return { useMarkdown, title };
 }
 
+function isMarkdownTableSeparator(line: string): boolean {
+  const normalized = line.trim();
+  if (!normalized.includes("-")) {
+    return false;
+  }
+  const cells = normalized
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.includes("|") && !trimmed.startsWith("```");
+}
+
+function parseMarkdownTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(lines: string[]): string {
+  const rows = lines.map(parseMarkdownTableRow).filter((cells) => cells.length > 0);
+  return rows.map((cells) => cells.join(" | ")).join("\n");
+}
+
+export function convertMarkdownTablesToPlainText(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let index = 0;
+  let inCodeFence = false;
+
+  while (index < lines.length) {
+    const line = lines[index] || "";
+    if (line.trim().startsWith("```")) {
+      inCodeFence = !inCodeFence;
+      output.push(line);
+      index += 1;
+      continue;
+    }
+
+    if (
+      !inCodeFence &&
+      index + 1 < lines.length &&
+      isMarkdownTableRow(line) &&
+      isMarkdownTableSeparator(lines[index + 1] || "")
+    ) {
+      const tableLines = [line];
+      index += 2;
+      while (index < lines.length && isMarkdownTableRow(lines[index] || "")) {
+        tableLines.push(lines[index] || "");
+        index += 1;
+      }
+      output.push(renderMarkdownTable(tableLines));
+      continue;
+    }
+
+    output.push(line);
+    index += 1;
+  }
+
+  return output.join("\n");
+}
+
 export function extractMessageContent(data: DingTalkInboundMessage): MessageContent {
   const msgtype = data.msgtype || "text";
 
