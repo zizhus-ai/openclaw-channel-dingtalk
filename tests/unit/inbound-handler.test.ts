@@ -21,6 +21,7 @@ const shared = vi.hoisted(() => ({
     acquireSessionLockMock: vi.fn(),
     appendQuoteJournalEntryMock: vi.fn(),
     resolveQuotedMessageByIdMock: vi.fn(),
+    extractAttachmentTextMock: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
@@ -41,6 +42,10 @@ vi.mock('../../src/runtime', () => ({
 
 vi.mock('../../src/message-utils', () => ({
     extractMessageContent: shared.extractMessageContentMock,
+}));
+
+vi.mock('../../src/attachment-text-extractor', () => ({
+    extractAttachmentText: shared.extractAttachmentTextMock,
 }));
 
 vi.mock('../../src/send-service', () => ({
@@ -151,6 +156,8 @@ describe('inbound-handler', () => {
         shared.appendQuoteJournalEntryMock.mockReturnValue(undefined);
         shared.resolveQuotedMessageByIdMock.mockReset();
         shared.resolveQuotedMessageByIdMock.mockReturnValue(null);
+        shared.extractAttachmentTextMock.mockReset();
+        shared.extractAttachmentTextMock.mockResolvedValue(null);
 
         shared.getRuntimeMock.mockReturnValue(buildRuntime());
         shared.extractMessageContentMock.mockReturnValue({ text: 'hello', messageType: 'text' });
@@ -1728,6 +1735,113 @@ describe('inbound-handler', () => {
         expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
             expect.objectContaining({
                 MediaType: 'application/pdf',
+                RawBody: '[钉钉文档]\n\n',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage injects extracted attachment text into inbound context', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[钉钉文档]\n\n',
+            messageType: 'interactiveCardFile',
+            docSpaceId: 'space_doc_1',
+            docFileId: 'file_doc_1',
+        });
+        shared.downloadGroupFileMock.mockResolvedValueOnce({
+            path: '/tmp/.openclaw/media/inbound/doc-card.bin',
+            mimeType: 'application/pdf',
+        });
+        shared.extractAttachmentTextMock.mockResolvedValueOnce({
+            text: '第一段\n第二段',
+            sourceType: 'pdf',
+            truncated: false,
+        });
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log: undefined,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'doc_origin_msg_extract',
+                msgtype: 'interactiveCard',
+                content: {
+                    fileName: 'manual.pdf',
+                    biz_custom_action_url: 'dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=space_doc_1&fileId=file_doc_1&type=file',
+                },
+                conversationType: '1',
+                conversationId: 'cid_dm_extract',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(shared.extractAttachmentTextMock).toHaveBeenCalledWith({
+            path: '/tmp/.openclaw/media/inbound/doc-card.bin',
+            mimeType: 'application/pdf',
+            fileName: 'manual.pdf',
+        });
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
+                RawBody: '[钉钉文档]\n\n\n\n[附件内容摘录]\n第一段\n第二段',
+                CommandBody: '[钉钉文档]\n\n\n\n[附件内容摘录]\n第一段\n第二段',
+            }),
+        );
+    });
+
+    it('handleDingTalkMessage keeps processing when attachment extraction fails', async () => {
+        const runtime = buildRuntime();
+        shared.getRuntimeMock.mockReturnValueOnce(runtime);
+        shared.extractMessageContentMock.mockReturnValueOnce({
+            text: '[钉钉文档]\n\n',
+            messageType: 'interactiveCardFile',
+            docSpaceId: 'space_doc_1',
+            docFileId: 'file_doc_1',
+        });
+        shared.downloadGroupFileMock.mockResolvedValueOnce({
+            path: '/tmp/.openclaw/media/inbound/doc-card.bin',
+            mimeType: 'application/pdf',
+        });
+        shared.extractAttachmentTextMock.mockRejectedValueOnce(new Error('parse failed'));
+        const log = {
+            info: vi.fn(),
+            warn: vi.fn(),
+            error: vi.fn(),
+            debug: vi.fn(),
+        };
+
+        await handleDingTalkMessage({
+            cfg: {},
+            accountId: 'main',
+            sessionWebhook: 'https://session.webhook',
+            log,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', robotCode: 'robot_1' } as any,
+            data: {
+                msgId: 'doc_origin_msg_extract_error',
+                msgtype: 'interactiveCard',
+                content: {
+                    fileName: 'manual.pdf',
+                    biz_custom_action_url: 'dingtalk://dingtalkclient/page/yunpan?route=previewDentry&spaceId=space_doc_1&fileId=file_doc_1&type=file',
+                },
+                conversationType: '1',
+                conversationId: 'cid_dm_extract_error',
+                senderId: 'user_1',
+                senderStaffId: 'staff_1',
+                chatbotUserId: 'bot_1',
+                sessionWebhook: 'https://session.webhook',
+                createAt: Date.now(),
+            },
+        } as any);
+
+        expect(log.warn).toHaveBeenCalledWith('[DingTalk] Failed to extract attachment text: parse failed');
+        expect(runtime.channel.reply.finalizeInboundContext).toHaveBeenCalledWith(
+            expect.objectContaining({
                 RawBody: '[钉钉文档]\n\n',
             }),
         );

@@ -1,5 +1,6 @@
 import axios from "axios";
 import { normalizeAllowFrom, isSenderAllowed, isSenderGroupAllowed } from "./access-control";
+import { extractAttachmentText } from "./attachment-text-extractor";
 import { getAccessToken } from "./auth";
 import {
   createAICard,
@@ -76,6 +77,7 @@ import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
 const DEFAULT_THINKING_MESSAGE = "🤔 思考中，请稍候...";
+const ATTACHMENT_TEXT_PREFIX = "[附件内容摘录]";
 const proactiveHintLastSentAt = new Map<string, number>();
 
 export function resetProactivePermissionHintStateForTest(): void {
@@ -1143,10 +1145,27 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     // Card cache miss: prefix already contains "[引用了机器人的回复]", keep as-is.
   }
 
-  const inboundText =
+  let attachmentExtractedText: string | undefined;
+  if (mediaPath) {
+    try {
+      const extracted = await extractAttachmentText({
+        path: mediaPath,
+        mimeType: mediaType,
+        fileName: data.content?.fileName,
+      });
+      if (extracted?.text) {
+        attachmentExtractedText = `${ATTACHMENT_TEXT_PREFIX}\n${extracted.text}`;
+      }
+    } catch (err: any) {
+      log?.warn?.(`[DingTalk] Failed to extract attachment text: ${err.message}`);
+    }
+  }
+
+  const inboundBody =
     mediaPath && /<media:[^>]+>/.test(content.text)
       ? `${content.text}\n[media_path: ${mediaPath}]\n[media_type: ${mediaType || "unknown"}]`
       : content.text;
+  const inboundText = attachmentExtractedText ? `${inboundBody}\n\n${attachmentExtractedText}` : inboundBody;
   const learningEnabled = isFeedbackLearningEnabled(dingtalkConfig);
   const learningContextBlock = buildLearningContextBlock({
     enabled: learningEnabled,
