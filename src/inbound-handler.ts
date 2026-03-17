@@ -1454,7 +1454,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           },
         },
         replyOptions: {
-          disableBlockStreaming: dingtalkConfig.cardRealTimeStream && controller ? true : undefined,
+          disableBlockStreaming: useCardMode
+            ? (dingtalkConfig.cardRealTimeStream && controller ? true : undefined)
+            : true,
 
           onAssistantMessageStart: controller
             ? () => { controller.notifyNewAssistantTurn(); }
