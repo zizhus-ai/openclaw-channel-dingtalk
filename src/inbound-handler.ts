@@ -41,7 +41,7 @@ import {
   resolveQuotedMessageById,
 } from "./quote-journal";
 import { getDingTalkRuntime } from "./runtime";
-import { sendBySession, sendMessage, sendProactiveMedia } from "./send-service";
+import { sendBySession, sendMessage, sendProactiveMedia, sendProactiveTextOrMarkdown } from "./send-service";
 import { clearSessionPeerOverride, getSessionPeerOverride, setSessionPeerOverride } from "./session-peer-store";
 import { resolveDingTalkSessionPeer } from "./session-routing";
 import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
@@ -1454,9 +1454,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           },
         },
         replyOptions: {
-          disableBlockStreaming: useCardMode
-            ? (dingtalkConfig.cardRealTimeStream && controller ? true : undefined)
-            : true,
+          // Card mode: intermediate blocks are unused — card updates go through
+          // onPartialReply (real-time) or deliver(final) → finishAICard (block-buffered).
+          // Markdown mode: runtime must buffer all blocks and deliver once via deliver(final).
+          // Both modes benefit from disabling block streaming.
+          disableBlockStreaming: true,
 
           onAssistantMessageStart: controller
             ? () => { controller.notifyNewAssistantTurn(); }
@@ -1524,16 +1526,21 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             || currentAICard.lastStreamedContent;
           if (fallbackText) {
             log?.debug?.("[DingTalk] Card failed during streaming, sending markdown fallback");
-            const sendResult = await sendMessage(dingtalkConfig, to, fallbackText, {
-              sessionWebhook,
-              atUserId: !isDirect ? senderId : null,
-              log,
-              accountId,
-              storePath,
-              conversationId: groupId,
-            });
-            if (!sendResult.ok) {
-              throw new Error(sendResult.error || "Markdown fallback send failed after card failure — user received no reply");
+            // Bypass sendMessage to avoid sendProactiveCardText creating a second card.
+            // Use sendBySession when session webhook is available, otherwise fall back
+            // to sendProactiveTextOrMarkdown which always sends markdown/text.
+            if (sessionWebhook) {
+              await sendBySession(dingtalkConfig, sessionWebhook, fallbackText, {
+                atUserId: !isDirect ? senderId : null,
+                log,
+              });
+            } else {
+              await sendProactiveTextOrMarkdown(
+                { ...dingtalkConfig, messageType: "markdown" },
+                to,
+                fallbackText,
+                { atUserId: !isDirect ? senderId : null, log, accountId, storePath, conversationId: groupId },
+              );
             }
           } else {
             log?.debug?.("[DingTalk] Card failed but no content to fallback with");
