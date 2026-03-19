@@ -324,7 +324,7 @@ describe('card-service', () => {
             conversationId: 'manager8031',
             kind: 'processQueryKey',
             value: 'carrier_dm_scope',
-        })).toBeNull();
+        })?.text).toBe('dm final text');
     });
 
     it('streamAICard marks FAILED and sends mismatch notification on 500 unknownError', async () => {

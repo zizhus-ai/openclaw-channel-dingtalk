@@ -207,6 +207,7 @@ interface PendingCardRecord {
   cardInstanceId: string;
   outTrackId?: string;
   conversationId: string;
+  contextConversationId?: string;
   createdAt: number;
   lastUpdated: number;
   state: string;
@@ -314,6 +315,7 @@ function upsertPendingCard(card: AICardInstance, storePath?: string, log?: Logge
     cardInstanceId: card.cardInstanceId,
     outTrackId: card.outTrackId,
     conversationId: card.conversationId,
+    contextConversationId: card.contextConversationId,
     createdAt: card.createdAt,
     lastUpdated: card.lastUpdated,
     state: card.state,
@@ -519,6 +521,7 @@ async function finalizePendingCardsByAccount(
       cardInstanceId: entry.cardInstanceId,
       accessToken: token,
       conversationId: entry.conversationId,
+      contextConversationId: entry.contextConversationId,
       accountId: entry.accountId,
       storePath,
       outTrackId: entry.outTrackId,
@@ -848,14 +851,25 @@ export async function finishAICard(
   log?.debug?.(`[DingTalk][AICard] Starting finish, final content length=${content.length}`);
   await streamAICard(card, content, true, log);
   if (card.conversationId && content.trim() && card.accountId && card.processQueryKey) {
+    const primaryConversationId = card.contextConversationId || card.conversationId;
     cacheCardContentByProcessQueryKey(
       card.accountId,
-      card.contextConversationId || card.conversationId,
+      primaryConversationId,
       card.processQueryKey,
       content,
       card.storePath,
       options.quotedRef,
     );
+    if (primaryConversationId !== card.conversationId) {
+      cacheCardContentByProcessQueryKey(
+        card.accountId,
+        card.conversationId,
+        card.processQueryKey,
+        content,
+        card.storePath,
+        options.quotedRef,
+      );
+    }
   }
 }
 
