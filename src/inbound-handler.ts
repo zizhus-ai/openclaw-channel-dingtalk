@@ -1,61 +1,11 @@
 import axios from "axios";
 import { normalizeAllowFrom, isSenderAllowed, isSenderGroupAllowed } from "./access-control";
+import { classifyAckReactionEmoji } from "./ack-reaction-classifier";
+import { attachNativeAckReaction, recallNativeAckReactionWithRetry } from "./ack-reaction-service";
 import { extractAttachmentText } from "./attachment-text-extractor";
 import { getAccessToken } from "./auth";
 import { createAICard } from "./card-service";
-import { classifyAckReactionEmoji } from "./ack-reaction-classifier";
 import { resolveAckReactionSetting, resolveGroupConfig } from "./config";
-import { formatGroupMembers, noteGroupMember } from "./group-members-store";
-import { setCurrentLogger } from "./logger-context";
-import {
-  formatLearnAppliedReply,
-  formatLearnCommandHelp,
-  formatLearnDeletedReply,
-  formatLearnDisabledReply,
-  formatLearnListReply,
-  formatOwnerOnlyDeniedReply,
-  formatOwnerStatusReply,
-  formatTargetSetSavedReply,
-  formatWhereAmIReply,
-  formatWhoAmIReply,
-  isLearningOwner,
-  parseLearnCommand,
-} from "./learning-command-service";
-import { extractMessageContent } from "./message-utils";
-import {
-  DEFAULT_CREATED_AT_MATCH_WINDOW_MS,
-  DEFAULT_MEDIA_CONTEXT_TTL_MS,
-  DEFAULT_MESSAGE_CONTEXT_TTL_DAYS,
-  resolveByAlias,
-  resolveByCreatedAtWindow,
-  resolveByMsgId,
-  upsertInboundMessageContext,
-} from "./message-context-store";
-import { prepareMediaInput, resolveOutboundMediaType } from "./media-utils";
-import { registerPeerId } from "./peer-id-registry";
-import {
-  clearProactiveRiskObservationsForTest,
-  getProactiveRiskObservationForAny,
-} from "./proactive-risk-registry";
-import { createReplyStrategy } from "./reply-strategy";
-import type { DeliverPayload } from "./reply-strategy";
-import { getDingTalkRuntime } from "./runtime";
-import { sendBySession, sendProactiveMedia } from "./send-service";
-import { clearSessionPeerOverride, getSessionPeerOverride, setSessionPeerOverride } from "./session-peer-store";
-import { resolveDingTalkSessionPeer } from "./session-routing";
-import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
-import { acquireSessionLock } from "./session-lock";
-import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
-import {
-  formatSessionAliasBoundReply,
-  formatSessionAliasClearedReply,
-  formatSessionAliasReply,
-  formatSessionAliasSetReply,
-  formatSessionAliasUnboundReply,
-  formatSessionAliasValidationErrorReply,
-  parseSessionCommand,
-  validateSessionAlias,
-} from "./session-command-service";
 import {
   applyManualTargetLearningRule,
   applyManualTargetsLearningRule,
@@ -71,7 +21,65 @@ import {
   listScopedLearningRules,
   resolveManualForcedReply,
 } from "./feedback-learning-service";
-import { attachNativeAckReaction, recallNativeAckReactionWithRetry } from "./ack-reaction-service";
+import { formatGroupMembers, noteGroupMember } from "./group-members-store";
+import {
+  formatLearnAppliedReply,
+  formatLearnCommandHelp,
+  formatLearnDeletedReply,
+  formatLearnDisabledReply,
+  formatLearnListReply,
+  formatOwnerOnlyDeniedReply,
+  formatOwnerStatusReply,
+  formatTargetSetSavedReply,
+  formatWhereAmIReply,
+  formatWhoAmIReply,
+  isLearningOwner,
+  parseLearnCommand,
+} from "./learning-command-service";
+import { setCurrentLogger } from "./logger-context";
+import { prepareMediaInput, resolveOutboundMediaType } from "./media-utils";
+import {
+  DEFAULT_CREATED_AT_MATCH_WINDOW_MS,
+  DEFAULT_MEDIA_CONTEXT_TTL_MS,
+  DEFAULT_MESSAGE_CONTEXT_TTL_DAYS,
+  resolveByAlias,
+  resolveByCreatedAtWindow,
+  resolveByMsgId,
+  upsertInboundMessageContext,
+} from "./message-context-store";
+import { extractMessageContent } from "./message-utils";
+import { registerPeerId } from "./peer-id-registry";
+import {
+  clearProactiveRiskObservationsForTest,
+  getProactiveRiskObservationForAny,
+} from "./proactive-risk-registry";
+import { downloadGroupFile, getUnionIdByStaffId, resolveQuotedFile } from "./quoted-file-service";
+import { createReplyStrategy } from "./reply-strategy";
+import type { DeliverPayload } from "./reply-strategy";
+import { getDingTalkRuntime } from "./runtime";
+import { sendBySession, sendProactiveMedia } from "./send-service";
+import {
+  formatSessionAliasBoundReply,
+  formatSessionAliasClearedReply,
+  formatSessionAliasReply,
+  formatSessionAliasSetReply,
+  formatSessionAliasUnboundReply,
+  formatSessionAliasValidationErrorReply,
+  parseSessionCommand,
+  validateSessionAlias,
+} from "./session-command-service";
+import { acquireSessionLock } from "./session-lock";
+import {
+  clearSessionPeerOverride,
+  getSessionPeerOverride,
+  setSessionPeerOverride,
+} from "./session-peer-store";
+import { resolveDingTalkSessionPeer } from "./session-routing";
+import {
+  upsertObservedGroupTarget,
+  upsertObservedUserTarget,
+} from "./targeting/target-directory-store";
+import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
 import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
@@ -121,7 +129,11 @@ function shouldSendProactivePermissionHint(params: {
     return false;
   }
 
-  const riskObservation = getProactiveRiskObservationForAny(params.accountId, riskTargets, params.nowMs);
+  const riskObservation = getProactiveRiskObservationForAny(
+    params.accountId,
+    riskTargets,
+    params.nowMs,
+  );
   if (!riskObservation || riskObservation.source !== "proactive-api") {
     return false;
   }
@@ -323,7 +335,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     } catch (err: any) {
       log?.debug?.(`[DingTalk] Failed to send proactive permission hint: ${err.message}`);
       if (err?.response?.data !== undefined) {
-        log?.debug?.(formatDingTalkErrorPayloadLog("inbound.proactivePermissionHint", err.response.data));
+        log?.debug?.(
+          formatDingTalkErrorPayloadLog("inbound.proactivePermissionHint", err.response.data),
+        );
       }
     }
   }
@@ -355,7 +369,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         } catch (err: any) {
           log?.debug?.(`[DingTalk] Failed to send access denied message: ${err.message}`);
           if (err?.response?.data !== undefined) {
-            log?.debug?.(formatDingTalkErrorPayloadLog("inbound.accessDeniedReply", err.response.data));
+            log?.debug?.(
+              formatDingTalkErrorPayloadLog("inbound.accessDeniedReply", err.response.data),
+            );
           }
         }
 
@@ -410,6 +426,32 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   const accountStorePath = rt.channel.session.resolveStorePath(cfg.session?.store, {
     agentId: accountId,
   });
+  try {
+    if (!isDirect && groupId) {
+      upsertObservedGroupTarget({
+        storePath: accountStorePath,
+        accountId,
+        conversationId: groupId,
+        title: groupName,
+        seenAt: data.createAt,
+      });
+    }
+    if (senderId || senderOriginalId) {
+      upsertObservedUserTarget({
+        storePath: accountStorePath,
+        accountId,
+        senderId: senderOriginalId || senderId,
+        staffId: senderStaffId || undefined,
+        displayName: senderName,
+        conversationId: groupId,
+        seenAt: data.createAt,
+      });
+    }
+  } catch (err) {
+    log?.warn?.(
+      `[DingTalk] Target directory observe failed: accountId=${accountId} groupId=${groupId || "-"} senderId=${senderOriginalId || senderId || "-"} storePath=${accountStorePath || "-"} error=${String(err)}`,
+    );
+  }
   const currentSessionSourceKind = isDirect ? "direct" : "group";
   const currentSessionSourceId = isDirect ? senderId : groupId;
   const peerIdOverride = getSessionPeerOverride({
@@ -491,22 +533,22 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     return;
   }
   if (
-    (parsedLearnCommand.scope === "global"
-      || parsedLearnCommand.scope === "session"
-      || parsedLearnCommand.scope === "here"
-      || parsedLearnCommand.scope === "target"
-      || parsedLearnCommand.scope === "targets"
-      || parsedLearnCommand.scope === "list"
-      || parsedLearnCommand.scope === "disable"
-      || parsedLearnCommand.scope === "delete"
-      || parsedLearnCommand.scope === "target-set-create"
-      || parsedLearnCommand.scope === "target-set-apply"
-      || parsedSessionCommand.scope === "session-alias-show"
-      || parsedSessionCommand.scope === "session-alias-set"
-      || parsedSessionCommand.scope === "session-alias-clear"
-      || parsedSessionCommand.scope === "session-alias-bind"
-      || parsedSessionCommand.scope === "session-alias-unbind")
-    && !isOwner
+    (parsedLearnCommand.scope === "global" ||
+      parsedLearnCommand.scope === "session" ||
+      parsedLearnCommand.scope === "here" ||
+      parsedLearnCommand.scope === "target" ||
+      parsedLearnCommand.scope === "targets" ||
+      parsedLearnCommand.scope === "list" ||
+      parsedLearnCommand.scope === "disable" ||
+      parsedLearnCommand.scope === "delete" ||
+      parsedLearnCommand.scope === "target-set-create" ||
+      parsedLearnCommand.scope === "target-set-apply" ||
+      parsedSessionCommand.scope === "session-alias-show" ||
+      parsedSessionCommand.scope === "session-alias-set" ||
+      parsedSessionCommand.scope === "session-alias-clear" ||
+      parsedSessionCommand.scope === "session-alias-bind" ||
+      parsedSessionCommand.scope === "session-alias-unbind") &&
+    !isOwner
   ) {
     await sendBySession(dingtalkConfig, sessionWebhook, formatOwnerOnlyDeniedReply(), { log });
     return;
@@ -574,10 +616,12 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       );
       return;
     }
-    if (parsedSessionCommand.scope === "session-alias-bind"
-      && parsedSessionCommand.sourceKind
-      && parsedSessionCommand.sourceId
-      && parsedSessionCommand.peerId) {
+    if (
+      parsedSessionCommand.scope === "session-alias-bind" &&
+      parsedSessionCommand.sourceKind &&
+      parsedSessionCommand.sourceId &&
+      parsedSessionCommand.peerId
+    ) {
       const aliasValidationError = validateSessionAlias(parsedSessionCommand.peerId);
       if (aliasValidationError) {
         await sendBySession(
@@ -607,9 +651,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       );
       return;
     }
-    if (parsedSessionCommand.scope === "session-alias-unbind"
-      && parsedSessionCommand.sourceKind
-      && parsedSessionCommand.sourceId) {
+    if (
+      parsedSessionCommand.scope === "session-alias-unbind" &&
+      parsedSessionCommand.sourceKind &&
+      parsedSessionCommand.sourceId
+    ) {
       const existed = clearSessionPeerOverride({
         storePath: accountStorePath,
         accountId,
@@ -684,7 +730,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       );
       return;
     }
-    if (parsedLearnCommand.scope === "target" && parsedLearnCommand.targetId && parsedLearnCommand.instruction) {
+    if (
+      parsedLearnCommand.scope === "target" &&
+      parsedLearnCommand.targetId &&
+      parsedLearnCommand.instruction
+    ) {
       const applied = applyManualTargetLearningRule({
         storePath: accountStorePath,
         accountId,
@@ -704,7 +754,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       );
       return;
     }
-    if (parsedLearnCommand.scope === "targets" && parsedLearnCommand.targetIds?.length && parsedLearnCommand.instruction) {
+    if (
+      parsedLearnCommand.scope === "targets" &&
+      parsedLearnCommand.targetIds?.length &&
+      parsedLearnCommand.instruction
+    ) {
       const applied = applyManualTargetsLearningRule({
         storePath: accountStorePath,
         accountId,
@@ -724,7 +778,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
       );
       return;
     }
-    if (parsedLearnCommand.scope === "target-set-create" && parsedLearnCommand.setName && parsedLearnCommand.targetIds?.length) {
+    if (
+      parsedLearnCommand.scope === "target-set-create" &&
+      parsedLearnCommand.setName &&
+      parsedLearnCommand.targetIds?.length
+    ) {
       const saved = createOrUpdateTargetSet({
         storePath: accountStorePath,
         accountId,
@@ -736,15 +794,19 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         sessionWebhook,
         saved
           ? formatTargetSetSavedReply({
-            setName: parsedLearnCommand.setName,
-            targetIds: parsedLearnCommand.targetIds,
-          })
+              setName: parsedLearnCommand.setName,
+              targetIds: parsedLearnCommand.targetIds,
+            })
           : "目标组保存失败，请检查名称和目标列表。",
         { log },
       );
       return;
     }
-    if (parsedLearnCommand.scope === "target-set-apply" && parsedLearnCommand.setName && parsedLearnCommand.instruction) {
+    if (
+      parsedLearnCommand.scope === "target-set-apply" &&
+      parsedLearnCommand.setName &&
+      parsedLearnCommand.instruction
+    ) {
       const applied = applyTargetSetLearningRule({
         storePath: accountStorePath,
         accountId,
@@ -756,12 +818,12 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         sessionWebhook,
         applied.length > 0
           ? formatLearnAppliedReply({
-            scope: "target-set",
-            setName: parsedLearnCommand.setName,
-            targetIds: applied.map((item) => item.targetId),
-            instruction: parsedLearnCommand.instruction,
-            ruleId: applied[0]?.ruleId,
-          })
+              scope: "target-set",
+              setName: parsedLearnCommand.setName,
+              targetIds: applied.map((item) => item.targetId),
+              instruction: parsedLearnCommand.instruction,
+              ruleId: applied[0]?.ruleId,
+            })
           : `未找到目标组 \`${parsedLearnCommand.setName}\`，或该目标组为空。`,
         { log },
       );
@@ -777,7 +839,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         });
       const targetSets = listLearningTargetSets({ storePath: accountStorePath, accountId })
         .slice(0, 10)
-        .map((targetSet) => `- [target-set] ${targetSet.name} => ${targetSet.targetIds.join(", ")}`);
+        .map(
+          (targetSet) => `- [target-set] ${targetSet.name} => ${targetSet.targetIds.join(", ")}`,
+        );
       await sendBySession(
         dingtalkConfig,
         sessionWebhook,
@@ -1209,7 +1273,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     mediaPath && /<media:[^>]+>/.test(content.text)
       ? `${content.text}\n[media_path: ${mediaPath}]\n[media_type: ${mediaType || "unknown"}]`
       : content.text;
-  const inboundText = attachmentExtractedText ? `${inboundBody}\n\n${attachmentExtractedText}` : inboundBody;
+  const inboundText = attachmentExtractedText
+    ? `${inboundBody}\n\n${attachmentExtractedText}`
+    : inboundBody;
   const learningEnabled = isFeedbackLearningEnabled(dingtalkConfig);
   const learningContextBlock = buildLearningContextBlock({
     enabled: learningEnabled,
@@ -1376,7 +1442,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     };
     return Array.isArray(richPayload.mediaUrls)
       ? richPayload.mediaUrls.filter((entry: unknown) => typeof entry === "string" && entry.trim())
-      : richPayload.mediaUrl && typeof richPayload.mediaUrl === "string" && richPayload.mediaUrl.trim()
+      : richPayload.mediaUrl &&
+          typeof richPayload.mediaUrl === "string" &&
+          richPayload.mediaUrl.trim()
         ? [richPayload.mediaUrl]
         : [];
   }
@@ -1423,7 +1491,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
             } catch (err: any) {
               log?.error?.(`[DingTalk] Reply failed: ${err.message}`);
               if (err?.response?.data !== undefined) {
-                log?.error?.(formatDingTalkErrorPayloadLog("inbound.replyDeliver", err.response.data));
+                log?.error?.(
+                  formatDingTalkErrorPayloadLog("inbound.replyDeliver", err.response.data),
+                );
               }
               throw err;
             }
@@ -1444,7 +1514,7 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         const elapsedMs = ackReactionAttachedAt > 0 ? Date.now() - ackReactionAttachedAt : 0;
         const remainingVisibleMs = MIN_THINKING_REACTION_VISIBLE_MS - elapsedMs;
         if (remainingVisibleMs > 0) {
-          await new Promise(resolve => setTimeout(resolve, remainingVisibleMs));
+          await new Promise((resolve) => setTimeout(resolve, remainingVisibleMs));
         }
         await recallNativeAckReactionWithRetry(
           dingtalkConfig,
