@@ -504,9 +504,12 @@ openclaw gateway restart
 - 该反馈作用于用户原消息，不会额外发送一条“思考中”消息
 - 解析顺序与官方一致：`channels.dingtalk.accounts.<accountId>.ackReaction` -> `channels.dingtalk.ackReaction` -> `messages.ackReaction` -> `agents.list[].identity.emoji`
 - 若上述路径都未配置，则不发送 ack reaction
-- 当最终解析值为 `emoji` 时，钉钉插件会按当前输入语气自动选择一条颜文字 reaction
+- 当最终解析值为 `emoji` 时，钉钉插件会贴固定的 `🤔思考中` 原生 reaction，并允许后续 tool-progress 流程动态切换
+- 当最终解析值为 `kaomoji` 时，钉钉插件会先按输入语气选一条颜文字作为初始 reaction；若后续进入 `read/search/bash/write` 等工具阶段，仍会临时切换到对应的 tool-progress reaction
+- 为兼容历史配置，`ackReaction: ""` 仍然表示关闭该能力；若你此前把 `ackReaction: "emoji"` 当作“按语气选颜文字”，升级后请改成 `ackReaction: "kaomoji"`
 - 当前钉钉实现底层走 `emotion/reply` / `emotion/recall`，会把解析出的 `ackReaction` 文本原样写入 `emotionName` / `textEmotion.emotionName`
 - 若配置值为 `🤔思考中`，效果与钉钉原生“思考中”反馈一致；配置为其他文本时，会按该文本发送对应的 ack reaction
+- 钉钉 `emotion/reply` 对部分 kaomoji 存在兼容性限制。当前候选集已按真实 API 多轮复测做过筛选，并移除了会稳定触发 `500 system.err` 的字符串，例如 `٩(๑>◡<๑)۶`、`(•̀へ •́ ╮ )`、`(´• ω •`)`、`(づ｡◕‿‿◕｡)づ`、`(⁄ ⁄•⁄ω⁄•⁄ ⁄)`、`┌（┌ *｀д´）┐`
 
 示例：
 
@@ -514,7 +517,7 @@ openclaw gateway restart
 {
   "channels": {
     "dingtalk": {
-      "ackReaction": "emoji"
+      "ackReaction": "kaomoji"
     }
   }
 }

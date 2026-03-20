@@ -19,6 +19,9 @@ import type {
 } from "openclaw/plugin-sdk";
 import { mergeAccountWithDefaults } from "./config";
 
+export type AckReactionMode = "off" | "emoji" | "kaomoji";
+export type AckReactionConfigValue = AckReactionMode | string;
+
 export interface DingtalkPluginModule {
   id: string;
   name: string;
@@ -44,7 +47,7 @@ export interface DingTalkConfig extends OpenClawConfig {
   displayNameResolution?: "disabled" | "all";
   mediaUrlAllowlist?: string[];
   journalTTLDays?: number;
-  ackReaction?: string;
+  ackReaction?: AckReactionConfigValue;
   debug?: boolean;
   messageType?: "markdown" | "card";
   cardTemplateId?: string;
@@ -111,7 +114,7 @@ export interface DingTalkChannelConfig {
   displayNameResolution?: "disabled" | "all";
   mediaUrlAllowlist?: string[];
   journalTTLDays?: number;
-  ackReaction?: string;
+  ackReaction?: AckReactionConfigValue;
   debug?: boolean;
   messageType?: "markdown" | "card";
   cardTemplateId?: string;

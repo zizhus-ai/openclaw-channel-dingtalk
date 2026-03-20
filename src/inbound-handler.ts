@@ -2,7 +2,8 @@ import axios from "axios";
 import { normalizeAllowFrom, isSenderAllowed, isSenderGroupAllowed } from "./access-control";
 import { buildAgentSessionKey, resolveSubAgentRoute, dispatchSubAgents } from "./targeting/agent-routing";
 import { classifyAckReactionEmoji } from "./ack-reaction-classifier";
-import { attachNativeAckReaction, recallNativeAckReactionWithRetry } from "./ack-reaction-service";
+import { attachNativeAckReaction } from "./ack-reaction-service";
+import { createDynamicAckReactionController } from "./ack-reaction/dynamic-ack-reaction-controller";
 import { extractAttachmentText } from "./attachment-text-extractor";
 import { getAccessToken } from "./auth";
 import { createAICard } from "./card-service";
@@ -83,10 +84,11 @@ import {
   upsertObservedUserTarget,
 } from "./targeting/target-directory-store";
 import type { DingTalkConfig, HandleDingTalkMessageParams, MediaFile } from "./types";
-import { formatDingTalkErrorPayloadLog, maskSensitiveData } from "./utils";
+import { formatDingTalkErrorPayloadLog, getErrorMessage, getErrorResponseData, maskSensitiveData } from "./utils";
 
 const DEFAULT_PROACTIVE_HINT_COOLDOWN_HOURS = 24;
 const MIN_THINKING_REACTION_VISIBLE_MS = 1200;
+const MAX_DYNAMIC_ACK_DISPOSE_WAIT_MS = 500;
 const ATTACHMENT_TEXT_PREFIX = "[附件内容摘录]";
 const proactiveHintLastSentAt = new Map<string, number>();
 
@@ -95,6 +97,42 @@ function ttlDaysToMs(ttlDays: number | undefined): number | undefined {
     return undefined;
   }
   return ttlDays * 24 * 60 * 60 * 1000;
+}
+
+async function waitForDynamicAckDispose(params: {
+  dispose: () => Promise<void>;
+  log?: { debug?: (message: string) => void; warn?: (message: string) => void };
+  sessionKey: string;
+}): Promise<void> {
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const disposePromise = params.dispose().catch((err: unknown) => {
+    params.log?.warn?.(
+      `[DingTalk] Dynamic ack reaction cleanup failed for session ${params.sessionKey}: ${getErrorMessage(err)}`,
+    );
+  });
+
+  try {
+    await Promise.race([
+      disposePromise,
+      new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, MAX_DYNAMIC_ACK_DISPOSE_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
+  if (timedOut) {
+    params.log?.debug?.(
+      `[DingTalk] Dynamic ack reaction cleanup timed out after ${MAX_DYNAMIC_ACK_DISPOSE_WAIT_MS}ms; releasing session lock for ${params.sessionKey}`,
+    );
+  }
 }
 
 export function resetProactivePermissionHintStateForTest(): void {
@@ -1439,8 +1477,13 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
           accountId,
           agentId: route.agentId,
         });
+  const normalizedAckReaction = ackReaction === "off" ? "" : ackReaction;
   const resolvedAckReaction =
-    ackReaction === "emoji" ? classifyAckReactionEmoji(content.text).emoji : ackReaction;
+    normalizedAckReaction === "kaomoji"
+      ? classifyAckReactionEmoji(content.text).emoji
+      : normalizedAckReaction === "emoji"
+        ? "🤔思考中"
+        : normalizedAckReaction;
   const shouldAttachAckReaction = Boolean(resolvedAckReaction);
   let ackReactionAttached = false;
   let ackReactionAttachedAt = 0;
@@ -1457,6 +1500,9 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
     );
     if (ackReactionAttached) {
       ackReactionAttachedAt = Date.now();
+      log?.debug?.(
+        `[DingTalk] Initial ack reaction attached mode=${normalizedAckReaction || "off"} reaction=${resolvedAckReaction}`,
+      );
     }
   }
 
@@ -1532,7 +1578,30 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
   // causes empty replies for all but the first caller.
   // Each sub-agent call acquires its own lock since sub-agent sessions have
   // different session keys (different agentId), so no deadlock risk.
+  const shouldTrackDynamicAckReaction =
+    (normalizedAckReaction === "emoji" || normalizedAckReaction === "kaomoji")
+    && shouldAttachAckReaction;
+  const runtimeEvents = (rt as typeof rt & {
+    events?: {
+      onAgentEvent?: (listener: (event: unknown) => void) => (() => void);
+    };
+  }).events;
   const releaseSessionLock = await acquireSessionLock(route.sessionKey);
+  const dynamicAckReactionController = createDynamicAckReactionController({
+    enabled: shouldTrackDynamicAckReaction,
+    initialReaction: resolvedAckReaction || "",
+    initialAttached: ackReactionAttached,
+    initialAttachedAt: ackReactionAttachedAt,
+    dingtalkConfig,
+    msgId: data.msgId,
+    conversationId: groupId,
+    sessionKey: route.sessionKey,
+    log,
+    runtimeEvents,
+    onReactionDisposed: () => {
+      ackReactionAttached = false;
+    },
+  });
   try {
     if (!ackReactionAttached && shouldAttachAckReaction) {
       log?.debug?.("[DingTalk] Native ack reaction unavailable; skipping fallback.");
@@ -1569,12 +1638,11 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
                 mediaUrls,
                 kind: (info?.kind as DeliverPayload["kind"]) || "block",
               });
-            } catch (err: any) {
-              log?.error?.(`[DingTalk] Reply failed: ${err.message}`);
-              if (err?.response?.data !== undefined) {
-                log?.error?.(
-                  formatDingTalkErrorPayloadLog("inbound.replyDeliver", err.response.data),
-                );
+            } catch (err: unknown) {
+              log?.error?.(`[DingTalk] Reply failed: ${getErrorMessage(err)}`);
+              const responseData = getErrorResponseData(err);
+              if (responseData !== undefined) {
+                log?.error?.(formatDingTalkErrorPayloadLog("inbound.replyDeliver", responseData));
               }
               throw err;
             }
@@ -1582,32 +1650,19 @@ export async function handleDingTalkMessage(params: HandleDingTalkMessageParams)
         },
         replyOptions: strategy.getReplyOptions(),
       });
-    } catch (dispatchErr: any) {
-      await strategy.abort(dispatchErr);
+    } catch (dispatchErr: unknown) {
+      const error = dispatchErr instanceof Error ? dispatchErr : new Error(getErrorMessage(dispatchErr));
+      await strategy.abort(error);
       throw dispatchErr;
     }
 
     await strategy.finalize();
   } finally {
+    await waitForDynamicAckDispose({
+      dispose: () => dynamicAckReactionController.dispose(MIN_THINKING_REACTION_VISIBLE_MS),
+      log,
+      sessionKey: route.sessionKey,
+    });
     releaseSessionLock();
-    if (ackReactionAttached) {
-      void (async () => {
-        const elapsedMs = ackReactionAttachedAt > 0 ? Date.now() - ackReactionAttachedAt : 0;
-        const remainingVisibleMs = MIN_THINKING_REACTION_VISIBLE_MS - elapsedMs;
-        if (remainingVisibleMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, remainingVisibleMs));
-        }
-        await recallNativeAckReactionWithRetry(
-          dingtalkConfig,
-          {
-            msgId: data.msgId,
-            conversationId: groupId,
-            reactionName: resolvedAckReaction,
-          },
-          log,
-        );
-      })();
-    }
   }
 }
-
