@@ -7421,4 +7421,54 @@ describe("inbound-handler", () => {
       expect(rt.channel.reply.dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
     });
   });
+
+  it("handleDingTalkMessage does not inject [media_path:] into body — sets MediaPath on ctx instead", async () => {
+    // Regression test for sandbox compatibility: the absolute host path must NOT appear
+    // in RawBody/CommandBody, because in sandbox mode the LLM cannot access host paths.
+    // OpenClaw core translates ctx.MediaPath to a sandbox-relative path via [media attached:].
+    // Uses msgtype: "file" to match the actual bug scenario reported in issue #429.
+    const runtime = buildRuntime();
+    shared.getRuntimeMock.mockReturnValueOnce(runtime);
+    shared.extractMessageContentMock.mockReturnValueOnce({
+      text: "<media:file> (report.pdf)",
+      messageType: "file",
+      mediaPath: "FILE_DOWNLOAD_CODE",
+    });
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { downloadUrl: "https://download.dingtalk.com/file" },
+    } as any);
+    mockedAxiosGet.mockResolvedValueOnce({
+      data: Buffer.from("%PDF"),
+      headers: { "content-type": "application/pdf" },
+    } as any);
+
+    await handleDingTalkMessage({
+      cfg: {},
+      accountId: "main",
+      sessionWebhook: "https://session.webhook",
+      log: undefined,
+      dingtalkConfig: { dmPolicy: "open", messageType: "markdown", robotCode: "robot_1" } as any,
+      data: {
+        msgId: "m_file_sandbox",
+        msgtype: "file",
+        content: { downloadCode: "FILE_DOWNLOAD_CODE", fileName: "report.pdf" },
+        conversationType: "1",
+        conversationId: "cid_dm_file",
+        senderId: "user_1",
+        chatbotUserId: "bot_1",
+        sessionWebhook: "https://session.webhook",
+        createAt: Date.now(),
+      },
+    } as any);
+
+    const finalized = runtime.channel.reply.finalizeInboundContext.mock.calls[0]?.[0];
+
+    // [media_path:] must NOT appear in body — it exposes the host absolute path which
+    // breaks sandbox mode. OpenClaw handles path translation via ctx.MediaPath.
+    expect(finalized.RawBody).not.toContain("[media_path:");
+    expect(finalized.CommandBody).not.toContain("[media_path:");
+
+    // ctx.MediaPath must still be set so OpenClaw can generate [media attached: relative/path]
+    expect(finalized.MediaPath).toContain("/.openclaw/media/inbound/");
+  });
 });
