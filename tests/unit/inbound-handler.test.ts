@@ -292,14 +292,29 @@ describe("inbound-handler", () => {
     expect(call[2]).toBe("inbound");
   });
 
-  it("downloadMedia returns null when robotCode missing", async () => {
+  it("downloadMedia falls back to clientId when robotCode is missing", async () => {
+    const runtime = buildRuntime();
+    shared.getRuntimeMock.mockReturnValue(runtime);
+
+    mockedAxiosPost.mockResolvedValueOnce({
+      data: { downloadUrl: "https://download.url/file" },
+    } as any);
+    mockedAxiosGet.mockResolvedValueOnce({
+      data: Buffer.from("abc"),
+      headers: { "content-type": "image/png" },
+    } as any);
+
     const result = await downloadMedia(
       { clientId: "id", clientSecret: "sec" } as any,
       "download_code_1",
     );
 
-    expect(result).toBeNull();
-    expect(mockedAxiosPost).not.toHaveBeenCalled();
+    expect(result).toBeTruthy();
+    expect(mockedAxiosPost).toHaveBeenCalledWith(
+      "https://api.dingtalk.com/v1.0/robot/messageFiles/download",
+      { downloadCode: "download_code_1", robotCode: "id" },
+      { headers: { "x-acs-dingtalk-access-token": "token_abc" } },
+    );
   });
 
   it("handleDingTalkMessage ignores self-message", async () => {
@@ -5496,7 +5511,6 @@ describe("inbound-handler", () => {
         messageType: "card",
         cardRealTimeStream: true,
         ackReaction: "",
-        showThinking: false,
       } as any,
       data: {
         msgId: "mid_accum_test",
@@ -5537,7 +5551,7 @@ describe("inbound-handler", () => {
       accountId: "main",
       sessionWebhook: "https://session.webhook",
       log: undefined,
-      dingtalkConfig: { dmPolicy: "open", messageType: "card", showThinking: false } as any,
+      dingtalkConfig: { dmPolicy: "open", messageType: "card" } as any,
       data: {
         msgId: "mid_empty_final",
         msgtype: "text",
@@ -5578,7 +5592,6 @@ describe("inbound-handler", () => {
       dingtalkConfig: {
         dmPolicy: "open",
         messageType: "card",
-        showThinking: false,
         cardRealTimeStream: false,
       } as any,
       data: {
@@ -5626,7 +5639,6 @@ describe("inbound-handler", () => {
         dmPolicy: "open",
         messageType: "card",
         cardRealTimeStream: true,
-        showThinking: false,
       } as any,
       data: {
         msgId: "mid_file_only",
@@ -6149,7 +6161,7 @@ describe("inbound-handler", () => {
             accountId: 'main',
             sessionWebhook: 'https://session.webhook',
             log: undefined,
-            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: true, ackReaction: '', showThinking: false } as any,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: true, ackReaction: '' } as any,
             data: {
                 msgId: 'mid_accum_test', msgtype: 'text', text: { content: 'hello' },
                 conversationType: '1', conversationId: 'cid_ok', senderId: 'user_1',
@@ -6190,7 +6202,6 @@ describe("inbound-handler", () => {
           groupPolicy: 'allowlist',
           allowFrom: ['allowed_group'],
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_subagent_1',
@@ -6244,7 +6255,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_subagent_2',
@@ -6286,7 +6296,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_subagent_3',
@@ -6333,7 +6342,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_text_real_user',
@@ -6383,7 +6391,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_text_invalid_agent',
@@ -6433,7 +6440,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_text_invalid_agent_no_real_users',
@@ -6494,7 +6500,6 @@ describe("inbound-handler", () => {
         dingtalkConfig: {
           dmPolicy: 'open',
           messageType: 'markdown',
-          showThinking: false,
         } as any,
         data: {
           msgId: 'm_webhook_order',
@@ -6538,7 +6543,7 @@ describe("inbound-handler", () => {
         accountId: 'main',
         sessionWebhook: 'https://session.webhook',
         log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
-        dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown', showThinking: false } as any,
+        dingtalkConfig: { dmPolicy: 'open', messageType: 'markdown' } as any,
         data: {
           msgId: 'fb1', msgtype: 'text', text: { content: '@expert1 help' },
           conversationType: '2', conversationId: 'group_1',
@@ -6571,7 +6576,7 @@ describe("inbound-handler", () => {
             accountId: 'main',
             sessionWebhook: 'https://session.webhook',
             log: undefined,
-            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', showThinking: false } as any,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card' } as any,
             data: {
                 msgId: 'mid_empty_final', msgtype: 'text', text: { content: 'hello' },
                 conversationType: '1', conversationId: 'cid_ok', senderId: 'user_1',
@@ -6603,7 +6608,7 @@ describe("inbound-handler", () => {
             accountId: 'main',
             sessionWebhook: 'https://session.webhook',
             log: undefined,
-            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', showThinking: false, cardRealTimeStream: false } as any,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: false } as any,
             data: {
                 msgId: 'mid_norealtime', msgtype: 'text', text: { content: 'hello' },
                 conversationType: '1', conversationId: 'cid_ok', senderId: 'user_1',
@@ -6639,7 +6644,7 @@ describe("inbound-handler", () => {
             accountId: 'main',
             sessionWebhook: 'https://session.webhook',
             log: undefined,
-            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: true, showThinking: false } as any,
+            dingtalkConfig: { dmPolicy: 'open', messageType: 'card', cardRealTimeStream: true } as any,
             data: {
                 msgId: 'mid_file_only', msgtype: 'text', text: { content: 'send me the file' },
                 conversationType: '1', conversationId: 'cid_ok', senderId: 'user_1',

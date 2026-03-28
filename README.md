@@ -350,9 +350,6 @@ openclaw configure --section channels
       "enabled": true,
       "clientId": "dingxxxxxx",
       "clientSecret": "your-app-secret",
-      "robotCode": "dingxxxxxx",
-      "corpId": "dingxxxxxx",
-      "agentId": "123456789",
       "dmPolicy": "open",
       "groupPolicy": "open",
       "displayNameResolution": "disabled", // 或 "all"；启用后可能因重名/旧名称/权限边界限制导致误解析
@@ -387,9 +384,7 @@ openclaw gateway restart
 | `enabled`               | boolean  | `true`       | 是否启用                                    |
 | `clientId`              | string   | 必填         | 应用的 AppKey                               |
 | `clientSecret`          | string   | 必填         | 应用的 AppSecret                            |
-| `robotCode`             | string   | -            | 机器人代码（用于下载媒体和发送卡片）        |
-| `corpId`                | string   | -            | 企业 ID                                     |
-| `agentId`               | string   | -            | 应用 ID                                     |
+| `robotCode`             | string   | -            | 可选兼容覆盖项；未配置时默认回退为 `clientId` |
 | `dmPolicy`              | string   | `"open"`     | 私聊策略：open/pairing/allowlist            |
 | `groupPolicy`           | string   | `"open"`     | 群聊策略：open/allowlist/disabled           |
 | `allowFrom`             | string[] | `[]`         | 允许的发送者 ID 列表（仅私聊）              |
@@ -1096,10 +1091,6 @@ node scripts/feedback-learning-debug.mjs --storePath /path/to/session-store.json
         "bot_1": {
           "clientId": "your-client-id-1",
           "clientSecret": "your-client-secret-1",
-          "robotCode": "your-robot-code-1",
-          "corpId": "your-corp-id",
-          // 这是钉钉应用自己的 Agent ID，不是 OpenClaw 的 agentId
-          "agentId": "your-dingtalk-agent-id-1",
           "dmPolicy": "open",
           "groupPolicy": "open",
           // 这里使用 card 消息类型作为示例
@@ -1113,10 +1104,6 @@ node scripts/feedback-learning-debug.mjs --storePath /path/to/session-store.json
         "bot_2": {
           "clientId": "your-client-id-2",
           "clientSecret": "your-client-secret-2",
-          "robotCode": "your-robot-code-2",
-          "corpId": "your-corp-id",
-          // 同样是钉钉应用自己的 Agent ID
-          "agentId": "your-dingtalk-agent-id-2",
           "dmPolicy": "open",
           "groupPolicy": "open",
           // 这里使用 markdown 消息类型作为示例
@@ -1212,7 +1199,6 @@ const cfg = {
     dingtalk: {
       clientId: 'dingxxxxxx',
       clientSecret: 'your-app-secret',
-      robotCode: 'dingxxxxxx',
     },
   },
 };
