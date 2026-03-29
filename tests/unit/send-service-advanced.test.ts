@@ -132,6 +132,9 @@ describe('send-service advanced branches', () => {
                 createdAt: expect.any(Number),
                 messageType: 'outbound-proactive',
                 text: 'card proactive text',
+                senderId: 'bot',
+                senderName: 'OpenClaw',
+                chatType: 'group',
                 quotedRef: {
                     targetDirection: 'inbound',
                     key: 'msgId',
@@ -249,6 +252,9 @@ describe('send-service advanced branches', () => {
                 createdAt: expect.any(Number),
                 messageType: 'outbound',
                 text: 'hello session',
+                senderId: 'bot',
+                senderName: 'OpenClaw',
+                chatType: 'group',
                 quotedRef: {
                     targetDirection: 'inbound',
                     key: 'msgId',

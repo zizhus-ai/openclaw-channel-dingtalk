@@ -10,6 +10,8 @@ import {
   clearMessageContextCacheForTest,
   DEFAULT_CARD_CONTENT_TTL_MS,
   DEFAULT_CREATED_AT_MATCH_WINDOW_MS,
+  DEFAULT_OUTBOUND_SENDER,
+  inferConversationChatType,
   resolveByCreatedAtWindow,
   upsertOutboundMessageContext,
 } from "./message-context-store";
@@ -888,6 +890,8 @@ function cacheCardContentByProcessQueryKey(
     createdAt: Date.now(),
     text: content,
     messageType: "card",
+    ...DEFAULT_OUTBOUND_SENDER,
+    chatType: inferConversationChatType(conversationId),
     ttlMs: DEFAULT_CARD_CONTENT_TTL_MS,
     topic: null,
     quotedRef,
@@ -925,6 +929,8 @@ export function cacheCardContent(
     createdAt,
     text: content,
     messageType: "card",
+    ...DEFAULT_OUTBOUND_SENDER,
+    chatType: inferConversationChatType(conversationId),
     ttlMs: DEFAULT_CARD_CONTENT_TTL_MS,
     topic: null,
   });
