@@ -25,6 +25,7 @@ export type AckReactionMode = "off" | "emoji" | "kaomoji";
 // Accept arbitrary strings for backward compatibility; the recommended
 // explicit modes remain: "off" | "emoji" | "kaomoji".
 export type AckReactionConfigValue = string;
+export type CardStreamingMode = "off" | "answer" | "all";
 
 /**
  * DingTalk channel configuration (extends base OpenClaw config)
@@ -71,8 +72,15 @@ export interface DingTalkConfig extends OpenClawConfig {
     enabled?: boolean;
     cooldownHours?: number;
   };
-  /** Enable real-time card streaming (default false, true = 300ms throttled per-token updates) */
+  /** Card streaming mode.
+   *  - off: disable incremental streaming
+   *  - answer: stream answer text
+   *  - all: stream answer + reasoning text */
+  cardStreamingMode?: CardStreamingMode;
+  /** @deprecated Use `cardStreamingMode` instead. */
   cardRealTimeStream?: boolean;
+  /** Throttle interval in ms for card stream updates (default 1000) */
+  cardStreamInterval?: number;
   /** AICard degrade duration in milliseconds after trigger errors (default 30m) */
   aicardDegradeMs?: number;
   /** Enable local learning loop (events/reflections/session notes/global rules) */
@@ -131,8 +139,15 @@ export interface DingTalkChannelConfig {
     enabled?: boolean;
     cooldownHours?: number;
   };
-  /** Enable real-time card streaming (default false, true = 300ms throttled per-token updates) */
+  /** Card streaming mode.
+   *  - off: disable incremental streaming
+   *  - answer: stream answer text
+   *  - all: stream answer + reasoning text */
+  cardStreamingMode?: CardStreamingMode;
+  /** @deprecated Use `cardStreamingMode` instead. */
   cardRealTimeStream?: boolean;
+  /** Throttle interval in ms for card stream updates (default 1000) */
+  cardStreamInterval?: number;
   /** AICard degrade duration in milliseconds after trigger errors (default 30m) */
   aicardDegradeMs?: number;
   /** Enable local learning loop (events/reflections/session notes/global rules) */
@@ -714,6 +729,33 @@ export interface ConnectionAttemptResult {
 
 const DEFAULT_ACCOUNT_ID = "default";
 
+function stripRemovedLegacyFieldsFromPublicAccount(
+  config: DingTalkConfig,
+): DingTalkConfig {
+  const {
+    cardStreamReasoning: _cardStreamReasoning,
+    verboseRealtimeStream: _verboseRealtimeStream,
+    accounts,
+    ...rest
+  } = config as DingTalkConfig & {
+    cardStreamReasoning?: unknown;
+    verboseRealtimeStream?: unknown;
+    accounts?: Record<string, DingTalkConfig | undefined>;
+  };
+  const sanitizedAccounts = accounts
+    ? Object.fromEntries(
+        Object.entries(accounts).map(([accountId, accountConfig]) => [
+          accountId,
+          accountConfig ? stripRemovedLegacyFieldsFromPublicAccount(accountConfig) : accountConfig,
+        ]),
+      )
+    : undefined;
+  if (sanitizedAccounts) {
+    return { ...rest, accounts: sanitizedAccounts } as DingTalkConfig;
+  }
+  return rest as DingTalkConfig;
+}
+
 /**
  * List all DingTalk account IDs from config
  */
@@ -758,7 +800,7 @@ export function resolveDingTalkAccount(
 
   // If default account, return top-level config
   if (id === DEFAULT_ACCOUNT_ID) {
-    const config: DingTalkConfig = {
+    const rawConfig: DingTalkConfig = {
       clientId: dingtalk?.clientId ?? "",
       clientSecret: dingtalk?.clientSecret ?? "",
       name: dingtalk?.name,
@@ -787,7 +829,9 @@ export function resolveDingTalkAccount(
       keepAlive: dingtalk?.keepAlive,
       bypassProxyForSend: dingtalk?.bypassProxyForSend,
       proactivePermissionHint: dingtalk?.proactivePermissionHint,
+      cardStreamingMode: dingtalk?.cardStreamingMode,
       cardRealTimeStream: dingtalk?.cardRealTimeStream,
+      cardStreamInterval: dingtalk?.cardStreamInterval,
       aicardDegradeMs: dingtalk?.aicardDegradeMs,
       learningEnabled: dingtalk?.learningEnabled,
       learningAutoApply: dingtalk?.learningAutoApply,
@@ -795,6 +839,7 @@ export function resolveDingTalkAccount(
       convertMarkdownTables: dingtalk?.convertMarkdownTables,
       cardAtSender: dingtalk?.cardAtSender,
     };
+    const config = stripRemovedLegacyFieldsFromPublicAccount(rawConfig);
     return {
       ...config,
       accountId: id,
@@ -809,8 +854,9 @@ export function resolveDingTalkAccount(
       dingtalk as DingTalkConfig,
       accountConfig,
     );
+    const publicMerged = stripRemovedLegacyFieldsFromPublicAccount(merged);
     return {
-      ...merged,
+      ...publicMerged,
       accountId: id,
       configured: Boolean(merged.clientId && merged.clientSecret),
     };

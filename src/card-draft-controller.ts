@@ -22,15 +22,18 @@ type TimelineEntry = {
 };
 
 export interface CardDraftController {
-    updateAnswer: (text: string) => Promise<void>;
+    updateAnswer: (text: string, options?: { stream?: boolean }) => Promise<void>;
     updateReasoning: (text: string) => Promise<void>;
     updateThinking: (text: string) => Promise<void>;
     appendThinkingBlock: (text: string) => Promise<void>;
     updateTool: (text: string) => Promise<void>;
     appendTool: (text: string) => Promise<void>;
+    appendToolBeforeCurrentAnswer: (text: string) => Promise<void>;
     /** Signal that a new assistant turn has started (e.g. after a tool call). */
     notifyNewAssistantTurn: () => Promise<void>;
     startAssistantTurn: () => Promise<void>;
+    /** Seal the active thinking entry (keep it in timeline) without removing it. */
+    sealActiveThinking: () => Promise<void>;
     flush: () => Promise<void>;
     waitForInFlight: () => Promise<void>;
     stop: () => void;
@@ -78,6 +81,8 @@ export function createCardDraftController(params: {
     let failed = false;
     let stopped = false;
     let lastSentContent = "";
+    let lastQueuedContent = "";
+    let inFlightContent = "";
     let lastAnswerContent = "";
 
     let timelineEntries: TimelineEntry[] = [];
@@ -119,6 +124,15 @@ export function createCardDraftController(params: {
 
     const findCurrentSegmentAnswerIndex = (): number | null => {
         return activeAnswerIndex;
+    };
+
+    const findLastAnswerEntryIndex = (): number | null => {
+        for (let index = timelineEntries.length - 1; index >= 0; index -= 1) {
+            if (timelineEntries[index]?.kind === "answer") {
+                return index;
+            }
+        }
+        return null;
     };
 
     const renderTimeline = (options: {
@@ -179,13 +193,29 @@ export function createCardDraftController(params: {
         activeAnswerIndex = null;
     };
 
+    const clearPendingRender = () => {
+        loop.resetPending();
+        lastQueuedContent = "";
+    };
+
     const queueRender = () => {
         const rendered = renderTimeline({ compactProcessAnswerSpacing: true });
-        if (rendered) {
-            loop.update(rendered);
+        if (!rendered) {
+            clearPendingRender();
             return;
         }
-        loop.resetPending();
+        if (rendered === lastSentContent) {
+            const hasNewerInFlight = !!inFlightContent && inFlightContent !== rendered;
+            if (!hasNewerInFlight) {
+                clearPendingRender();
+                return;
+            }
+        }
+        if (rendered === lastQueuedContent) {
+            return;
+        }
+        lastQueuedContent = rendered;
+        loop.update(rendered);
     };
 
     const flushBoundaryFrame = async () => {
@@ -220,14 +250,20 @@ export function createCardDraftController(params: {
         throttleMs: effectiveThrottleMs,
         isStopped: () => stopped || failed,
         sendOrEditStreamMessage: async (content: string) => {
+            inFlightContent = content;
             try {
                 await streamAICard(params.card, content, false, params.log);
                 lastSentContent = content;
+                lastQueuedContent = "";
                 lastAnswerContent = getFinalAnswerContent();
             } catch (err: unknown) {
                 failed = true;
                 const message = err instanceof Error ? err.message : String(err);
                 params.log?.warn?.(`[DingTalk][AICard] Stream failed: ${message}`);
+            } finally {
+                if (inFlightContent === content) {
+                    inFlightContent = "";
+                }
             }
         },
     });
@@ -255,7 +291,7 @@ export function createCardDraftController(params: {
         queueRender();
     };
 
-    const updateAnswer = async (text: string) => {
+    const updateAnswer = async (text: string, options: { stream?: boolean } = {}) => {
         await waitForPendingBoundary();
         if (stopped || failed) {
             return;
@@ -275,6 +311,10 @@ export function createCardDraftController(params: {
             timelineEntries[activeAnswerIndex] = { kind: "answer", text: normalized };
         } else {
             activeAnswerIndex = appendTimelineEntry("answer", normalized);
+        }
+        if (options.stream === false) {
+            clearPendingRender();
+            return;
         }
         queueRender();
     };
@@ -323,6 +363,35 @@ export function createCardDraftController(params: {
         queueRender();
     };
 
+    const appendToolBeforeCurrentAnswer = async (text: string) => {
+        await waitForPendingBoundary();
+        if (stopped || failed) {
+            return;
+        }
+        const normalized = normalizeProcessText(text);
+        if (!normalized) {
+            return;
+        }
+        if (timelineEntries.length > 0) {
+            await flushBoundaryFrame();
+        }
+        sealLiveThinking();
+        const insertionIndex = findCurrentSegmentAnswerIndex() ?? findLastAnswerEntryIndex();
+        if (insertionIndex !== null) {
+            timelineEntries.splice(insertionIndex, 0, { kind: "tool", text: normalized });
+            if (activeAnswerIndex !== null && activeAnswerIndex >= insertionIndex) {
+                activeAnswerIndex += 1;
+            }
+            if (activeThinkingIndex !== null && activeThinkingIndex >= insertionIndex) {
+                activeThinkingIndex += 1;
+            }
+        } else {
+            sealCurrentAnswer();
+            appendTimelineEntry("tool", normalized);
+        }
+        queueRender();
+    };
+
     const notifyNewAssistantTurn = async () => {
         if (stopped || failed) {
             return;
@@ -334,7 +403,7 @@ export function createCardDraftController(params: {
         }
         if (activeThinkingIndex !== null) {
             removeTimelineEntry(activeThinkingIndex);
-            loop.resetPending();
+            clearPendingRender();
         }
     };
 
@@ -345,8 +414,18 @@ export function createCardDraftController(params: {
         appendThinkingBlock,
         updateTool,
         appendTool: updateTool,
+        appendToolBeforeCurrentAnswer,
         notifyNewAssistantTurn,
         startAssistantTurn: notifyNewAssistantTurn,
+        sealActiveThinking: async () => {
+            if (stopped || failed) {
+                return;
+            }
+            if (activeThinkingIndex !== null) {
+                sealLiveThinking();
+                await beginBoundaryFlush();
+            }
+        },
         flush: () => loop.flush(),
         waitForInFlight: () => loop.waitForInFlight(),
 

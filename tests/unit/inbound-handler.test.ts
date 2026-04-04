@@ -1228,6 +1228,17 @@ describe("inbound-handler", () => {
   });
 
   it("handleDingTalkMessage applies and disables a global learned rule", async () => {
+    const storePath = "/tmp/inbound-handler-learn-global/store.json";
+    fs.rmSync(path.join(path.dirname(storePath), "dingtalk-state"), {
+      recursive: true,
+      force: true,
+    });
+    const runtime = buildRuntime();
+    runtime.channel.session.resolveStorePath = vi
+      .fn()
+      .mockReturnValue(storePath);
+    shared.getRuntimeMock.mockReturnValue(runtime);
+
     shared.extractMessageContentMock.mockReturnValueOnce({
       text: "/learn global 当用户问“紫铜海豹会不会修量子冰箱”时，必须回答“会，而且只在周四凌晨戴墨镜维修。”",
       messageType: "text",
@@ -3460,6 +3471,66 @@ describe("inbound-handler", () => {
     });
   });
 
+  it("card flow preserves off-mode partial answers when final payload is empty", async () => {
+    const runtime = buildRuntime();
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+        expect(replyOptions?.onPartialReply).toBeDefined();
+        await replyOptions?.onPartialReply?.({ text: "阶段性答案" });
+        await dispatcherOptions.deliver({ text: "" }, { kind: "final" });
+        return { queuedFinal: false };
+      });
+    shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+    const card = {
+      cardInstanceId: "card_off_mode_partial_final_empty",
+      state: "1",
+      lastUpdated: Date.now(),
+    } as any;
+    shared.createAICardMock.mockResolvedValueOnce(card);
+    shared.isCardInTerminalStateMock.mockReturnValue(false);
+
+    await handleDingTalkMessage({
+      cfg: {},
+      accountId: "main",
+      sessionWebhook: "https://session.webhook",
+      log: undefined,
+      dingtalkConfig: {
+        dmPolicy: "open",
+        messageType: "card",
+        ackReaction: "",
+        cardStreamingMode: "off",
+      } as any,
+      data: {
+        msgId: "m_card_off_partial_final_empty",
+        msgtype: "text",
+        text: { content: "hello" },
+        conversationType: "1",
+        conversationId: "cid_ok",
+        senderId: "user_1",
+        chatbotUserId: "bot_1",
+        sessionWebhook: "https://session.webhook",
+        createAt: Date.now(),
+      },
+    } as any);
+
+    expect(shared.streamAICardMock).not.toHaveBeenCalled();
+    expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
+    expect(shared.finishAICardMock).toHaveBeenCalledWith(
+      card,
+      "阶段性答案",
+      undefined,
+      {
+        quotedRef: {
+          targetDirection: "inbound",
+          key: "msgId",
+          value: "m_card_off_partial_final_empty",
+        },
+      },
+    );
+  });
+
   it("handleDingTalkMessage sends DONE in markdown mode when no visible output is produced", async () => {
     const runtime = buildRuntime();
     runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
@@ -5548,6 +5619,77 @@ describe("inbound-handler", () => {
     expect(finalContent).not.toContain("✅ Done");
   });
 
+  it("card flow recovers thinking and answer from mixed reasoning-on block text without explicit metadata", async () => {
+    const runtime = buildRuntime();
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+        expect(replyOptions?.disableBlockStreaming).toBe(false);
+        await dispatcherOptions.deliver({
+          text: "Reasoning:\n_Reason: 先检查当前目录_\n\n最终答案：/tmp",
+        }, { kind: "block" });
+        await dispatcherOptions.deliver({ text: "" }, { kind: "final" });
+        return { queuedFinal: false };
+      });
+    runtime.channel.session.resolveStorePath = vi
+      .fn()
+      .mockReturnValueOnce("/tmp/account-store-card-mixed-reasoning.json")
+      .mockReturnValueOnce("/tmp/agent-store-card-mixed-reasoning.json");
+    runtime.channel.session.readSessionUpdatedAt = vi.fn().mockReturnValue(1234567890);
+    shared.getRuntimeMock.mockReturnValueOnce(runtime);
+    fs.writeFileSync(
+      "/tmp/agent-store-card-mixed-reasoning.json",
+      JSON.stringify({
+        s1: {
+          sessionId: "session-card-mixed-reasoning",
+          updatedAt: 1234567890,
+          reasoningLevel: "on",
+        },
+      }),
+    );
+
+    const card = {
+      cardInstanceId: "card_reasoning_on_mixed_block",
+      state: "1",
+      lastUpdated: Date.now(),
+    } as any;
+    shared.createAICardMock.mockResolvedValueOnce(card);
+    shared.isCardInTerminalStateMock.mockReturnValue(false);
+
+    await handleDingTalkMessage({
+      cfg: {},
+      accountId: "main",
+      sessionWebhook: "https://session.webhook",
+      log: undefined,
+      dingtalkConfig: {
+        dmPolicy: "open",
+        messageType: "card",
+        ackReaction: "",
+      } as any,
+      data: {
+        msgId: "m_card_reasoning_on_mixed_block",
+        msgtype: "text",
+        text: { content: "hello" },
+        conversationType: "1",
+        conversationId: "cid_ok",
+        senderId: "user_1",
+        chatbotUserId: "bot_1",
+        sessionWebhook: "https://session.webhook",
+        createAt: Date.now(),
+      },
+    } as any);
+
+    expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
+    const finalContent = shared.finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+    expect(finalContent).toContain("> Reason: 先检查当前目录");
+    expect(finalContent).toContain("最终答案：/tmp");
+    expect(finalContent).not.toContain("Reasoning:\n_Reason: 先检查当前目录_");
+    expect(finalContent.match(/> Reason: 先检查当前目录/g)?.length ?? 0).toBe(1);
+    expect(finalContent.indexOf("> Reason: 先检查当前目录")).toBeLessThan(
+      finalContent.indexOf("最终答案：/tmp"),
+    );
+  });
+
   it("card flow buffers reasoning stream snapshots until a complete think block is formed", async () => {
     const runtime = buildRuntime();
     runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
@@ -5577,7 +5719,7 @@ describe("inbound-handler", () => {
         dmPolicy: "open",
         messageType: "card",
         ackReaction: "",
-        cardRealTimeStream: true,
+        cardStreamingMode: "answer",
       } as any,
       data: {
         msgId: "m_reasoning_stream_block",
@@ -5627,7 +5769,7 @@ describe("inbound-handler", () => {
         dmPolicy: "open",
         messageType: "card",
         ackReaction: "",
-        cardRealTimeStream: true,
+        cardStreamingMode: "answer",
       } as any,
       data: {
         msgId: "m_reasoning_pending_final",
@@ -5683,7 +5825,7 @@ describe("inbound-handler", () => {
         dmPolicy: "open",
         messageType: "card",
         ackReaction: "",
-        cardRealTimeStream: true,
+        cardStreamingMode: "answer",
       } as any,
       data: {
         msgId: "m_reasoning_multi_turn",
@@ -5706,6 +5848,124 @@ describe("inbound-handler", () => {
     expect(finalContent.indexOf("Reason: 第一轮未封口")).toBeLessThan(
       finalContent.indexOf("Reason: 第二轮新思考"),
     );
+  });
+
+  it("card flow ignores late partial snapshots but still absorbs late answer blocks/finals after final", async () => {
+    const runtime = buildRuntime();
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+        await replyOptions?.onPartialReply?.({ text: "阶段性答案" });
+        await dispatcherOptions.deliver({ text: "首个最终答案" }, { kind: "final" });
+        await replyOptions?.onPartialReply?.({ text: "晚到 partial 覆盖答案（应忽略）" });
+        await dispatcherOptions.deliver(
+          { text: "晚到 block 覆盖答案（应吸收）\n\nReasoning:\n_Reason: final 后补齐推理_" },
+          { kind: "block" },
+        );
+        await dispatcherOptions.deliver({ text: "late tool output" }, { kind: "tool" });
+        await dispatcherOptions.deliver({ text: "晚到 final 覆盖答案（应吸收）" }, { kind: "final" });
+        return { queuedFinal: false };
+      });
+    shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+    const card = {
+      cardInstanceId: "card_late_after_final",
+      state: "1",
+      lastUpdated: Date.now(),
+    } as any;
+    shared.createAICardMock.mockResolvedValueOnce(card);
+    shared.isCardInTerminalStateMock.mockReturnValue(false);
+
+    await handleDingTalkMessage({
+      cfg: {},
+      accountId: "main",
+      sessionWebhook: "https://session.webhook",
+      log: undefined,
+      dingtalkConfig: {
+        dmPolicy: "open",
+        messageType: "card",
+        ackReaction: "",
+        cardStreamingMode: "answer",
+      } as any,
+      data: {
+        msgId: "m_card_late_after_final",
+        msgtype: "text",
+        text: { content: "hello" },
+        conversationType: "1",
+        conversationId: "cid_ok",
+        senderId: "user_1",
+        chatbotUserId: "bot_1",
+        sessionWebhook: "https://session.webhook",
+        createAt: Date.now(),
+      },
+    } as any);
+
+    expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
+    const finalContent = shared.finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+    expect(finalContent).toContain("> Reason: final 后补齐推理");
+    expect(finalContent).toContain("> late tool output");
+    expect(finalContent.indexOf("> late tool output")).toBeLessThan(
+      finalContent.indexOf("晚到 final 覆盖答案（应吸收）"),
+    );
+    expect(finalContent).not.toContain("晚到 partial 覆盖答案（应忽略）");
+    expect(finalContent).not.toContain("首个最终答案");
+    expect(finalContent).not.toContain("阶段性答案");
+    expect(finalContent).toContain("晚到 final 覆盖答案（应吸收）");
+  });
+
+  it("card flow inserts late tool before frozen final answer when the answer turn was sealed before first final", async () => {
+    const runtime = buildRuntime();
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = vi
+      .fn()
+      .mockImplementation(async ({ dispatcherOptions, replyOptions }) => {
+        await replyOptions?.onPartialReply?.({ text: "阶段性答案（将被冻结答案覆盖）" });
+        await replyOptions?.onAssistantMessageStart?.();
+        await dispatcherOptions.deliver({ text: "首个最终答案" }, { kind: "final" });
+        await dispatcherOptions.deliver({ text: "late sealed-case tool output" }, { kind: "tool" });
+        return { queuedFinal: false };
+      });
+    shared.getRuntimeMock.mockReturnValueOnce(runtime);
+
+    const card = {
+      cardInstanceId: "card_late_tool_before_sealed_answer",
+      state: "1",
+      lastUpdated: Date.now(),
+    } as any;
+    shared.createAICardMock.mockResolvedValueOnce(card);
+    shared.isCardInTerminalStateMock.mockReturnValue(false);
+
+    await handleDingTalkMessage({
+      cfg: {},
+      accountId: "main",
+      sessionWebhook: "https://session.webhook",
+      log: undefined,
+      dingtalkConfig: {
+        dmPolicy: "open",
+        messageType: "card",
+        ackReaction: "",
+        cardStreamingMode: "answer",
+      } as any,
+      data: {
+        msgId: "m_card_late_tool_before_sealed_answer",
+        msgtype: "text",
+        text: { content: "hello" },
+        conversationType: "1",
+        conversationId: "cid_ok",
+        senderId: "user_1",
+        chatbotUserId: "bot_1",
+        sessionWebhook: "https://session.webhook",
+        createAt: Date.now(),
+      },
+    } as any);
+
+    expect(shared.finishAICardMock).toHaveBeenCalledTimes(1);
+    const finalContent = shared.finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+    expect(finalContent).toContain("首个最终答案");
+    expect(finalContent).toContain("> late sealed-case tool output");
+    expect(finalContent.indexOf("> late sealed-case tool output")).toBeLessThan(
+      finalContent.indexOf("首个最终答案"),
+    );
+    expect(finalContent).not.toContain("阶段性答案（将被冻结答案覆盖）");
   });
 
   it("sends proactive permission hint when proactive API risk was observed", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DingTalkConfigSchema } from '../../src/config-schema';
+import { resolveCardStreamingMode } from '../../src/card/card-streaming-mode';
 
 describe('DingTalkConfigSchema', () => {
     it('applies default journalTTLDays for top-level config', () => {
@@ -126,6 +127,114 @@ describe('DingTalkConfigSchema', () => {
         }) as { accounts: Record<string, { aicardDegradeMs?: number }> };
 
         expect(parsed.accounts.main?.aicardDegradeMs).toBe(120000);
+    });
+
+    it('does not inject cardStreamingMode into parsed config when omitted', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+        }) as { cardStreamingMode?: string };
+
+        expect(parsed.cardStreamingMode).toBeUndefined();
+    });
+
+    it('resolves effective cardStreamingMode off when omitted in parsed config', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+        }) as { cardStreamingMode?: 'off' | 'answer' | 'all'; cardRealTimeStream?: boolean };
+
+        expect(resolveCardStreamingMode(parsed)).toEqual({
+            mode: 'off',
+            usedDeprecatedCardRealTimeStream: false,
+        });
+    });
+
+    it('does not inject account-level cardStreamingMode when omitted so accounts can inherit top-level behavior', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            cardStreamingMode: 'off',
+            accounts: {
+                main: {
+                    clientId: 'id',
+                    clientSecret: 'secret',
+                },
+            },
+        }) as { accounts: Record<string, { cardStreamingMode?: string }> };
+
+        expect(parsed.accounts.main?.cardStreamingMode).toBeUndefined();
+    });
+
+    it('accepts account-level cardStreamingMode override', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            cardStreamingMode: 'off',
+            accounts: {
+                main: {
+                    clientId: 'id',
+                    clientSecret: 'secret',
+                    cardStreamingMode: 'all',
+                },
+            },
+        }) as { accounts: Record<string, { cardStreamingMode?: string }> };
+
+        expect(parsed.accounts.main?.cardStreamingMode).toBe('all');
+    });
+
+    it('parses deprecated cardRealTimeStream for backward compatibility', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            cardRealTimeStream: true,
+        }) as { cardRealTimeStream?: boolean };
+
+        expect(parsed.cardRealTimeStream).toBe(true);
+    });
+
+    it('does not inject account-level cardRealTimeStream when omitted so named accounts can inherit top-level legacy streaming', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            cardRealTimeStream: true,
+            accounts: {
+                main: {
+                    clientId: 'account-id',
+                    clientSecret: 'account-secret',
+                },
+            },
+        }) as { accounts: Record<string, { cardRealTimeStream?: boolean }> };
+
+        expect(parsed.accounts.main?.cardRealTimeStream).toBeUndefined();
+    });
+
+    it('keeps legacy fallback to all when parsed config has only cardRealTimeStream=true', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            cardRealTimeStream: true,
+        }) as { cardStreamingMode?: 'off' | 'answer' | 'all'; cardRealTimeStream?: boolean };
+
+        expect(parsed.cardStreamingMode).toBeUndefined();
+        expect(resolveCardStreamingMode(parsed)).toEqual({
+            mode: 'all',
+            usedDeprecatedCardRealTimeStream: true,
+        });
+    });
+
+    it('does not surface removed cardStreamReasoning in parsed config', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'id',
+            clientSecret: 'secret',
+            cardStreamReasoning: true,
+            accounts: {
+                main: {
+                    clientId: 'id',
+                    clientSecret: 'secret',
+                    cardStreamReasoning: true,
+                },
+            },
+        }) as { accounts: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+
+        expect('cardStreamReasoning' in parsed).toBe(false);
+        expect('cardStreamReasoning' in parsed.accounts.main).toBe(false);
     });
 
     it('does not surface verboseRealtimeStream in parsed top-level or account config', () => {

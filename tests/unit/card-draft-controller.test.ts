@@ -619,4 +619,100 @@ describe("card-draft-controller", () => {
 
         expect(sent.at(-1)).toContain("阶段2答案：pwd 已返回结果");
     });
+
+    it("does not send the same rendered timeline twice", async () => {
+        const card = makeCard();
+        const controller = createCardDraftController({ card, throttleMs: 0 });
+
+        await controller.appendThinkingBlock("先检查目录");
+        await vi.advanceTimersByTimeAsync(0);
+
+        await controller.sealActiveThinking();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(streamAICardMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not resend when updateAnswer receives unchanged text", async () => {
+        const card = makeCard();
+        const controller = createCardDraftController({ card, throttleMs: 0 });
+
+        await controller.updateAnswer("same text");
+        await vi.advanceTimersByTimeAsync(0);
+
+        await controller.updateAnswer("same text");
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(streamAICardMock).toHaveBeenCalledTimes(1);
+        expect(streamAICardMock).toHaveBeenLastCalledWith(card, "same text", false, undefined);
+    });
+
+    it("does not suppress the first fresh-turn reasoning update after pending reset", async () => {
+        const card = makeCard();
+        const controller = createCardDraftController({ card, throttleMs: 300 });
+
+        await controller.updateReasoning("首次思考");
+        await vi.advanceTimersByTimeAsync(0);
+
+        streamAICardMock.mockClear();
+
+        await controller.updateReasoning("同一条思考");
+        await controller.notifyNewAssistantTurn();
+        await controller.updateReasoning("同一条思考");
+        await vi.advanceTimersByTimeAsync(300);
+
+        expect(streamAICardMock).toHaveBeenCalledTimes(1);
+        expect(streamAICardMock).toHaveBeenLastCalledWith(card, "> 同一条思考", false, undefined);
+    });
+
+    it("cancels stale queued frame when timeline reverts to last sent content", async () => {
+        const card = makeCard();
+        const controller = createCardDraftController({ card, throttleMs: 300 });
+
+        await controller.updateAnswer("A");
+        await vi.advanceTimersByTimeAsync(0);
+
+        streamAICardMock.mockClear();
+
+        await controller.updateAnswer("B");
+        await controller.updateAnswer("A");
+        await vi.advanceTimersByTimeAsync(300);
+
+        expect(streamAICardMock).not.toHaveBeenCalled();
+        expect(controller.getLastContent()).toBe("A");
+    });
+
+    it("resends last sent content when reverting while a newer frame is still in-flight", async () => {
+        const sent: string[] = [];
+        let resolveB!: () => void;
+        streamAICardMock.mockImplementation(async (_card, content) => {
+            sent.push(content);
+            if (content === "B") {
+                await new Promise<void>((r) => { resolveB = r; });
+            }
+        });
+
+        const card = makeCard();
+        const controller = createCardDraftController({ card, throttleMs: 0 });
+
+        await controller.updateAnswer("A");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sent).toEqual(["A"]);
+
+        const sendB = controller.updateAnswer("B");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sent).toEqual(["A", "B"]);
+
+        const revertToA = controller.updateAnswer("A");
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sent).toEqual(["A", "B"]);
+
+        resolveB();
+        await sendB;
+        await revertToA;
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(sent).toEqual(["A", "B", "A"]);
+        expect(controller.getLastContent()).toBe("A");
+    });
 });

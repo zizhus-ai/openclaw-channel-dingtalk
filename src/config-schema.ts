@@ -7,6 +7,8 @@ const AckReactionSchema = z.union([
   z.string().min(1),
 ]);
 
+const CardStreamingModeSchema = z.enum(["off", "answer", "all"]);
+
 const DingTalkAccountConfigShape = {
   /** Account name (optional display name) */
   name: z.string().optional(),
@@ -109,9 +111,18 @@ const DingTalkAccountConfigShape = {
     .optional()
     .default({ enabled: true, cooldownHours: 24 }),
 
-  /** Enable real-time card streaming (default: false).
-   *  When true, card updates are streamed per-token with 300ms throttle for a smoother experience, at the cost of more API calls. */
-  cardRealTimeStream: z.boolean().optional().default(false),
+  /** Enable deprecated real-time card streaming compatibility.
+   *  When true and `cardStreamingMode` is unset, runtime resolves to `cardStreamingMode: "all"`. */
+  cardRealTimeStream: z.boolean().optional(),
+
+  /** Card streaming mode:
+   *  - off: disable incremental streaming
+   *  - answer: stream answer text
+   *  - all: stream answer + reasoning text */
+  cardStreamingMode: CardStreamingModeSchema.optional(),
+
+  /** Throttle interval in ms for card stream updates (default: 1000). */
+  cardStreamInterval: z.number().int().min(200).optional().default(1000),
 
   /** AICard degrade duration in milliseconds after trigger errors (default: 30 minutes) */
   aicardDegradeMs: z.number().int().min(60_000).optional().default(30 * 60 * 1000),

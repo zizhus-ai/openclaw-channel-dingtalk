@@ -1,6 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DingTalkConfigSchema } from '../../src/config-schema';
 import {
     getConfig,
     isConfigured,
@@ -94,6 +95,86 @@ describe('config advanced', () => {
         expect(resolved.messageType).toBe('markdown');
     });
 
+    it('account-level cardStreamingMode overrides top-level default in resolved config', () => {
+        const cfg = {
+            channels: {
+                dingtalk: {
+                    clientId: 'top_id',
+                    clientSecret: 'top_sec',
+                    cardStreamingMode: 'off',
+                    accounts: {
+                        bot2: {
+                            clientId: 'bot2_id',
+                            clientSecret: 'bot2_sec',
+                            cardStreamingMode: 'all',
+                        },
+                    },
+                },
+            },
+        } as any;
+
+        const resolved = getConfig(cfg, 'bot2');
+        expect(resolved.cardStreamingMode).toBe('all');
+    });
+
+    it('getConfig resolves effective cardStreamingMode to off when both new and legacy flags are absent', () => {
+        const cfg = {
+            channels: {
+                dingtalk: {
+                    clientId: 'top_id',
+                    clientSecret: 'top_sec',
+                },
+            },
+        } as any;
+
+        const resolved = getConfig(cfg);
+        expect(resolved.cardStreamingMode).toBe('off');
+    });
+
+    it('named account inherits top-level cardStreamingMode when account-level value is omitted', () => {
+        const cfg = {
+            channels: {
+                dingtalk: {
+                    clientId: 'top_id',
+                    clientSecret: 'top_sec',
+                    cardStreamingMode: 'answer',
+                    accounts: {
+                        bot2: {
+                            clientId: 'bot2_id',
+                            clientSecret: 'bot2_sec',
+                        },
+                    },
+                },
+            },
+        } as any;
+
+        const resolved = getConfig(cfg, 'bot2');
+        expect(resolved.cardStreamingMode).toBe('answer');
+    });
+
+    it('named account inherits top-level legacy cardRealTimeStream through parsed config when account-level value is omitted', () => {
+        const parsed = DingTalkConfigSchema.parse({
+            clientId: 'top_id',
+            clientSecret: 'top_sec',
+            cardRealTimeStream: true,
+            accounts: {
+                bot2: {
+                    clientId: 'bot2_id',
+                    clientSecret: 'bot2_sec',
+                },
+            },
+        });
+        const cfg = {
+            channels: {
+                dingtalk: parsed,
+            },
+        } as any;
+
+        const resolved = getConfig(cfg, 'bot2');
+        expect(resolved.cardRealTimeStream).toBe(true);
+        expect(resolved.cardStreamingMode).toBe('all');
+    });
+
     it('merged config does not leak accounts key', () => {
         const cfg = {
             channels: {
@@ -109,6 +190,32 @@ describe('config advanced', () => {
 
         const resolved = getConfig(cfg, 'bot1');
         expect((resolved as any).accounts).toBeUndefined();
+    });
+
+    it('strips removed cardStreamReasoning in resolved single-account and named-account configs', () => {
+        const cfg = {
+            channels: {
+                dingtalk: {
+                    clientId: 'top_id',
+                    clientSecret: 'top_sec',
+                    cardStreamReasoning: true,
+                    accounts: {
+                        bot1: {
+                            clientId: 'bot1_id',
+                            clientSecret: 'bot1_sec',
+                            cardStreamReasoning: true,
+                        },
+                    },
+                },
+            },
+        } as any;
+
+        const topLevelResolved = getConfig(cfg);
+        const namedResolved = getConfig(cfg, 'bot1');
+
+        expect('cardStreamReasoning' in (topLevelResolved as any)).toBe(false);
+        expect('cardStreamReasoning' in (namedResolved as any)).toBe(false);
+        expect('cardStreamReasoning' in ((topLevelResolved as any).accounts?.bot1 ?? {})).toBe(false);
     });
 
     it('isConfigured validates by clientId/clientSecret', () => {

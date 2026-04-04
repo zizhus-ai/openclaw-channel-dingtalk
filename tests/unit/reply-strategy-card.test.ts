@@ -63,9 +63,9 @@ function buildCtx(
 describe("reply-strategy-card", () => {
     beforeEach(() => {
         vi.useFakeTimers();
-        finishAICardMock.mockClear();
-        streamAICardMock.mockClear().mockResolvedValue(undefined);
-        sendMessageMock.mockClear().mockResolvedValue({ ok: true });
+        finishAICardMock.mockReset().mockResolvedValue(undefined as any);
+        streamAICardMock.mockReset().mockResolvedValue(undefined);
+        sendMessageMock.mockReset().mockResolvedValue({ ok: true });
     });
 
     afterEach(() => {
@@ -87,19 +87,57 @@ describe("reply-strategy-card", () => {
             expect(strategy.getReplyOptions().disableBlockStreaming).toBe(false);
         });
 
-        it("registers onPartialReply only when cardRealTimeStream=true", () => {
+        it("registers onPartialReply when cardStreamingMode=answer", () => {
             const card = makeCard();
             const ctx = buildCtx(card, {
-                config: { clientId: "id", clientSecret: "s", messageType: "card", cardRealTimeStream: true } as any,
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "answer" } as any,
             });
             const opts = createCardReplyStrategy(ctx).getReplyOptions();
             expect(opts.onPartialReply).toBeDefined();
         });
 
-        it("does not register onPartialReply when cardRealTimeStream=false", () => {
+        it("registers onPartialReply when cardStreamingMode=off so answer snapshots can still be buffered locally", () => {
             const card = makeCard();
-            const strategy = createCardReplyStrategy(buildCtx(card));
-            expect(strategy.getReplyOptions().onPartialReply).toBeUndefined();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "off" } as any,
+            }));
+            expect(strategy.getReplyOptions().onPartialReply).toBeDefined();
+        });
+
+        it("streams partial answers into the card timeline when cardStreamingMode=answer", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "answer" } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+            expect(streamAICardMock.mock.calls[0]?.[1]).toContain("阶段性答案");
+        });
+
+        it("buffers partial answers locally when cardStreamingMode=off and reuses them during finalize", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "off" } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await strategy.deliver({ text: "", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            expect(finishAICardMock).toHaveBeenCalledTimes(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("阶段性答案");
+            expect(rendered).not.toContain("✅ Done");
+            expect(strategy.getFinalText()).toBe("阶段性答案");
         });
 
         it("always registers onReasoningStream and onAssistantMessageStart", () => {
@@ -193,6 +231,178 @@ describe("reply-strategy-card", () => {
         });
     });
 
+    describe("cardStreamingMode", () => {
+        it("off mode does not live-stream partial answers and only flushes reasoning at boundary/final", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "off" } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            expect(opts.onPartialReply).toBeDefined();
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await opts.onReasoningStream?.({ text: "Reasoning:\n_先检查当前目录_" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await strategy.deliver({ text: "最终答案", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("> 先检查当前目录");
+            expect(rendered).toContain("最终答案");
+        });
+
+        it("answer mode streams partial answers but buffers reasoning until boundary/final", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "answer" } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+            expect(streamAICardMock.mock.calls[0]?.[1]).toContain("阶段性答案");
+
+            await opts.onReasoningStream?.({ text: "Reasoning:\n_Reason: 暂存思考" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+
+            await strategy.deliver({ text: "最终答案", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("> Reason: 暂存思考");
+            expect(rendered).toContain("最终答案");
+        });
+
+        it("all mode streams answer partials and reasoning snapshots live", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "all" } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onReasoningStream?.({ text: "第一轮推理" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+            expect(streamAICardMock.mock.calls[0]?.[1]).toContain("> 第一轮推理");
+
+            await opts.onAssistantMessageStart?.();
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(2);
+            expect(streamAICardMock.mock.calls[1]?.[1]).toContain("阶段性答案");
+        });
+
+        it("legacy fallback maps cardRealTimeStream=true to all mode when cardStreamingMode is omitted", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardRealTimeStream: true } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            expect(opts.onPartialReply).toBeDefined();
+
+            await opts.onReasoningStream?.({ text: "兼容模式推理" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+            expect(streamAICardMock.mock.calls[0]?.[1]).toContain("> 兼容模式推理");
+
+            await opts.onPartialReply?.({ text: "兼容模式答案" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(2);
+            expect(streamAICardMock.mock.calls[1]?.[1]).toContain("兼容模式答案");
+        });
+
+        it("legacy fallback uses the unified 1000ms default throttle when cardStreamInterval is unset", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardRealTimeStream: true } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onReasoningStream?.({ text: "快速推理1" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+
+            await opts.onReasoningStream?.({ text: "快速推理2" });
+            await vi.advanceTimersByTimeAsync(999);
+            expect(streamAICardMock).toHaveBeenCalledTimes(1);
+
+            await vi.advanceTimersByTimeAsync(1);
+            expect(streamAICardMock).toHaveBeenCalledTimes(2);
+            expect(streamAICardMock.mock.calls[1]?.[1]).toContain("> 快速推理2");
+        });
+
+        it("explicit cardStreamingMode wins over deprecated cardRealTimeStream", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "s",
+                    messageType: "card",
+                    cardStreamingMode: "off",
+                    cardRealTimeStream: true,
+                } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            expect(opts.onPartialReply).toBeDefined();
+
+            await opts.onPartialReply?.({ text: "阶段性答案" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await opts.onReasoningStream?.({ text: "Reasoning:\n_Reason: 优先显式模式" });
+            await vi.advanceTimersByTimeAsync(0);
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await strategy.deliver({ text: "最终答案", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("> Reason: 优先显式模式");
+            expect(rendered).toContain("最终答案");
+        });
+
+        it("respects cardStreamInterval for throttle in all mode", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "s",
+                    messageType: "card",
+                    cardStreamingMode: "all",
+                    cardStreamInterval: 2000,
+                } as any,
+            }));
+            const opts = strategy.getReplyOptions();
+
+            await opts.onReasoningStream?.({ text: "快速思考1" });
+            await vi.advanceTimersByTimeAsync(500);
+            await opts.onReasoningStream?.({ text: "快速思考2" });
+            await vi.advanceTimersByTimeAsync(500);
+
+            const callsAt1000 = streamAICardMock.mock.calls.length;
+            expect(callsAt1000).toBe(1);
+
+            await vi.advanceTimersByTimeAsync(1000);
+            const callsAt2000 = streamAICardMock.mock.calls.length;
+            expect(callsAt2000).toBe(2);
+            expect(streamAICardMock.mock.calls[callsAt2000 - 1]?.[1]).toContain("> 快速思考2");
+        });
+    });
+
     describe("deliver", () => {
         it("deliver(final) saves text for finalize but does not send immediately", async () => {
             const card = makeCard();
@@ -264,9 +474,36 @@ describe("reply-strategy-card", () => {
             expect(sendMessageMock).not.toHaveBeenCalled();
         });
 
-        it("deliver(block) routes reasoning-on blocks into the card timeline", async () => {
+        it("deliver(block) with explicit reasoning metadata respects off-mode buffering before final", async () => {
             const card = makeCard();
-            const strategy = createCardReplyStrategy(buildCtx(card));
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "off" } as any,
+            }));
+
+            await strategy.deliver({
+                text: "Reasoning:\n_Reason: 先检查当前目录_",
+                mediaUrls: [],
+                kind: "block",
+                isReasoning: true,
+            });
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(streamAICardMock).not.toHaveBeenCalled();
+
+            await strategy.deliver({ text: "最终答案", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            expect(streamAICardMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("> Reason: 先检查当前目录");
+            expect(rendered).toContain("最终答案");
+        });
+
+        it("deliver(block) with explicit reasoning metadata streams live in all mode", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: { clientId: "id", clientSecret: "s", messageType: "card", cardStreamingMode: "all" } as any,
+            }));
 
             await strategy.deliver({
                 text: "Reasoning:\n_Reason: 先检查当前目录_",
@@ -280,7 +517,7 @@ describe("reply-strategy-card", () => {
             expect(streamAICardMock.mock.calls[0]?.[1]).toContain("> Reason: 先检查当前目录");
         });
 
-        it("deliver(block) keeps visible Reasoning text in the answer lane when no explicit reasoning metadata is present", async () => {
+        it("deliver(block) routes standalone Reasoning text into the thinking lane when no explicit reasoning metadata is present", async () => {
             const card = makeCard();
             const strategy = createCardReplyStrategy(buildCtx(card, {
                 disableBlockStreaming: false,
@@ -295,8 +532,8 @@ describe("reply-strategy-card", () => {
 
             expect(finishAICardMock).toHaveBeenCalledTimes(1);
             const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
-            expect(rendered).toContain("Reasoning:\n_用户要求分步思考后给结论，纯推理任务。_");
-            expect(rendered).not.toContain("> 用户要求分步思考后给结论，纯推理任务。");
+            expect(rendered).toContain("> 用户要求分步思考后给结论，纯推理任务。");
+            expect(rendered).not.toContain("Reasoning:\n_用户要求分步思考后给结论，纯推理任务。_");
         });
 
         it("deliver(block) updates the answer timeline when block streaming is enabled for card mode", async () => {
@@ -317,7 +554,7 @@ describe("reply-strategy-card", () => {
             expect(streamAICardMock.mock.calls[0]?.[1]).not.toContain("> 最终答案");
         });
 
-        it("deliver(block) keeps mixed answer-plus-Reasoning payloads as plain answer text without explicit reasoning metadata", async () => {
+        it("deliver(block) splits mixed answer-plus-Reasoning payloads into thinking and answer timeline entries", async () => {
             const card = makeCard();
             const strategy = createCardReplyStrategy(buildCtx(card, {
                 disableBlockStreaming: false,
@@ -333,8 +570,10 @@ describe("reply-strategy-card", () => {
             expect(finishAICardMock).toHaveBeenCalledTimes(1);
             const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
             expect(rendered).toContain("结论：3天");
-            expect(rendered).toContain("Reasoning:\n_1. 任务总量设为 1。_");
-            expect(rendered).not.toContain("> 1. 任务总量设为 1。");
+            expect(rendered).toContain("> 1. 任务总量设为 1。");
+            expect(rendered).not.toContain("Reasoning:\n_1. 任务总量设为 1。_");
+            expect(rendered.match(/> 1\. 任务总量设为 1。/g)?.length ?? 0).toBe(1);
+            expect(rendered.indexOf("> 1. 任务总量设为 1。")).toBeLessThan(rendered.indexOf("结论：3天"));
         });
 
         it("deliver(block) keeps markdown reasoning-process sections as plain answer text without explicit reasoning markers", async () => {
@@ -602,6 +841,33 @@ describe("reply-strategy-card", () => {
             expect(rendered).not.toContain("✅ Done");
         });
 
+        it("finalize keeps the latest partial answer when final delivery has no explicit answer text", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "secret",
+                    messageType: "card",
+                    cardRealTimeStream: true,
+                } as any,
+            }));
+
+            await strategy.getReplyOptions().onPartialReply?.({ text: "阶段性答案" });
+            await strategy.deliver({
+                text: "Reasoning:\n_Reason: 先执行 pwd_",
+                mediaUrls: [],
+                kind: "block",
+                isReasoning: true,
+            });
+            await strategy.deliver({ text: "", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            expect(finishAICardMock).toHaveBeenCalledTimes(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("阶段性答案");
+            expect(rendered).toContain("> Reason: 先执行 pwd");
+        });
+
         it("finalize keeps late pure-reasoning blocks before the current answer in the same segment", async () => {
             const card = makeCard();
             const strategy = createCardReplyStrategy(buildCtx(card, {
@@ -630,7 +896,7 @@ describe("reply-strategy-card", () => {
             );
         });
 
-        it("finalize treats late visible Reasoning text without metadata as ordinary answer text", async () => {
+        it("finalize routes late visible Reasoning text without metadata into the thinking lane", async () => {
             const card = makeCard();
             const strategy = createCardReplyStrategy(buildCtx(card, {
                 disableBlockStreaming: false,
@@ -650,12 +916,12 @@ describe("reply-strategy-card", () => {
 
             expect(finishAICardMock).toHaveBeenCalledTimes(1);
             const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
-            expect(rendered).toContain("Reasoning:\n_1. 先计算每个人的效率_");
-            expect(rendered).toContain("_2. 再汇总总效率_");
-            expect(rendered).not.toContain("> 1. 先计算每个人的效率");
+            expect(rendered).toContain("> 1. 先计算每个人的效率");
+            expect(rendered).toContain("> 2. 再汇总总效率");
+            expect(rendered).not.toContain("Reasoning:\n_1. 先计算每个人的效率_");
         });
 
-        it("finalize keeps mixed final payloads as answer text without explicit reasoning metadata", async () => {
+        it("finalize splits mixed final payloads into thinking and answer content without explicit reasoning metadata", async () => {
             const card = makeCard();
             const strategy = createCardReplyStrategy(buildCtx(card, {
                 disableBlockStreaming: false,
@@ -671,8 +937,13 @@ describe("reply-strategy-card", () => {
             expect(finishAICardMock).toHaveBeenCalledTimes(1);
             const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
             expect(rendered).toContain("经过分步计算，结论如下：任务预计 3 天完成。");
-            expect(rendered).toContain("Reasoning:\n_1. 先计算每个人的效率_");
-            expect(rendered).not.toContain("> 1. 先计算每个人的效率");
+            expect(rendered).toContain("> 1. 先计算每个人的效率");
+            expect(rendered).not.toContain("Reasoning:\n_1. 先计算每个人的效率_");
+            expect(rendered.match(/> 1\. 先计算每个人的效率/g)?.length ?? 0).toBe(1);
+            expect(rendered.indexOf("> 1. 先计算每个人的效率")).toBeLessThan(
+                rendered.indexOf("经过分步计算，结论如下：任务预计 3 天完成。"),
+            );
+            expect(strategy.getFinalText()).toBe("经过分步计算，结论如下：任务预计 3 天完成。");
         });
         it("finalize prefers the final answer snapshot over an earlier partial answer", async () => {
             const card = makeCard();
@@ -695,6 +966,99 @@ describe("reply-strategy-card", () => {
             expect(rendered).toContain("阶段性答案 + 最终补充");
             expect(rendered).not.toContain("阶段性答案\n");
             expect(strategy.getFinalText()).toBe("阶段性答案 + 最终补充");
+        });
+
+        it("ignores late partial snapshots after first final while still accepting late answer blocks/finals, reasoning, and tool tails", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "secret",
+                    messageType: "card",
+                    cardStreamingMode: "answer",
+                } as any,
+            }));
+            const replyOptions = strategy.getReplyOptions();
+
+            await replyOptions.onPartialReply?.({ text: "阶段性答案" });
+            await strategy.deliver({ text: "首个最终答案", mediaUrls: [], kind: "final" });
+
+            await replyOptions.onPartialReply?.({ text: "晚到 partial 答案（应忽略）" });
+            await strategy.deliver({ text: "晚到 block 答案（应吸收）", mediaUrls: [], kind: "block" });
+            await replyOptions.onReasoningStream?.({ text: "Reasoning:\n_Reason: 最后补齐思考_" });
+            await strategy.deliver({ text: "late tool output", mediaUrls: [], kind: "tool" });
+            await strategy.deliver({ text: "晚到 final 覆盖答案（应吸收）", mediaUrls: [], kind: "final" });
+
+            await strategy.finalize();
+
+            expect(finishAICardMock).toHaveBeenCalledTimes(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("> Reason: 最后补齐思考");
+            expect(rendered).toContain("> late tool output");
+            expect(rendered.indexOf("> late tool output")).toBeLessThan(
+                rendered.indexOf("晚到 final 覆盖答案（应吸收）"),
+            );
+            expect(rendered).not.toContain("晚到 partial 答案（应忽略）");
+            expect(rendered).not.toContain("首个最终答案");
+            expect(rendered).not.toContain("阶段性答案");
+            expect(strategy.getFinalText()).toBe("晚到 final 覆盖答案（应吸收）");
+        });
+
+        it("in final_seen inserts late tool before the last sealed answer that gets overridden at finalize", async () => {
+            const card = makeCard();
+            const strategy = createCardReplyStrategy(buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "secret",
+                    messageType: "card",
+                    cardStreamingMode: "answer",
+                } as any,
+            }));
+            const replyOptions = strategy.getReplyOptions();
+
+            await replyOptions.onPartialReply?.({ text: "阶段性答案（将被冻结答案覆盖）" });
+            await replyOptions.onAssistantMessageStart?.();
+            await strategy.deliver({ text: "首个最终答案", mediaUrls: [], kind: "final" });
+            await strategy.deliver({ text: "late sealed-case tool output", mediaUrls: [], kind: "tool" });
+            await strategy.finalize();
+
+            expect(finishAICardMock).toHaveBeenCalledTimes(1);
+            const rendered = finishAICardMock.mock.calls.at(-1)?.[1] ?? "";
+            expect(rendered).toContain("首个最终答案");
+            expect(rendered).toContain("> late sealed-case tool output");
+            expect(rendered.indexOf("> late sealed-case tool output")).toBeLessThan(
+                rendered.indexOf("首个最终答案"),
+            );
+            expect(rendered).not.toContain("阶段性答案（将被冻结答案覆盖）");
+        });
+
+        it("ignores all callbacks and deliveries after finalize seals the card lifecycle", async () => {
+            const card = makeCard();
+            const ctx = buildCtx(card, {
+                config: {
+                    clientId: "id",
+                    clientSecret: "secret",
+                    messageType: "card",
+                    cardStreamingMode: "all",
+                } as any,
+            });
+            const strategy = createCardReplyStrategy(ctx);
+            const replyOptions = strategy.getReplyOptions();
+
+            await strategy.deliver({ text: "首个最终答案", mediaUrls: [], kind: "final" });
+            await strategy.finalize();
+
+            const streamCallCountAfterFinalize = streamAICardMock.mock.calls.length;
+            await replyOptions.onPartialReply?.({ text: "sealed 后 partial（应忽略）" });
+            await replyOptions.onReasoningStream?.({ text: "Reasoning:\n_Reason: sealed 后 reasoning（应忽略）_" });
+            await replyOptions.onAssistantMessageStart?.();
+            await strategy.deliver({ text: "sealed 后 tool（应忽略）", mediaUrls: [], kind: "tool" });
+            await strategy.deliver({ text: "sealed 后 final（应忽略）", mediaUrls: ["/tmp/final.png"], kind: "final" });
+
+            expect(streamAICardMock.mock.calls.length).toBe(streamCallCountAfterFinalize);
+            expect(ctx.deliverMedia).not.toHaveBeenCalled();
+            expect(finishAICardMock).toHaveBeenCalledTimes(1);
+            expect(strategy.getFinalText()).toBe("首个最终答案");
         });
 
         it("streams plain reasoning-like partial replies as ordinary answer text when no explicit reasoning signal exists", async () => {

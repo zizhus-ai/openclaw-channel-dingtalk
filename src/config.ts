@@ -26,12 +26,34 @@ function normalizeLearningConfig(
     learningNoteTtlMs: options.applyDefaults
       ? config.learningNoteTtlMs ?? DEFAULT_LEARNING_NOTE_TTL_MS
       : config.learningNoteTtlMs,
+    cardStreamingMode: options.applyDefaults
+      ? (config.cardStreamingMode ?? (config.cardRealTimeStream === true ? "all" : "off"))
+      : config.cardStreamingMode,
   };
 }
 
 function stripRemovedLegacyFields(config: DingTalkConfig): DingTalkConfig {
-  const { verboseRealtimeStream: _verboseRealtimeStream, ...rest } =
-    config as DingTalkConfig & { verboseRealtimeStream?: unknown };
+  const {
+    verboseRealtimeStream: _verboseRealtimeStream,
+    cardStreamReasoning: _cardStreamReasoning,
+    accounts,
+    ...rest
+  } = config as DingTalkConfig & {
+    verboseRealtimeStream?: unknown;
+    cardStreamReasoning?: unknown;
+    accounts?: Record<string, DingTalkConfig | undefined>;
+  };
+  const sanitizedAccounts = accounts
+    ? Object.fromEntries(
+        Object.entries(accounts).map(([accountId, accountConfig]) => [
+          accountId,
+          accountConfig ? stripRemovedLegacyFields(accountConfig) : accountConfig,
+        ]),
+      )
+    : undefined;
+  if (sanitizedAccounts) {
+    return { ...rest, accounts: sanitizedAccounts } as DingTalkConfig;
+  }
   return rest as DingTalkConfig;
 }
 
@@ -84,7 +106,7 @@ export function getConfig(cfg: OpenClawConfig, accountId?: string): DingTalkConf
   }
 
   if (dingtalkCfg.accounts && Object.keys(dingtalkCfg.accounts).length > 0) {
-    return dingtalkCfg;
+    return stripRemovedLegacyFields(dingtalkCfg);
   }
 
   return stripRemovedLegacyFields(normalizeLearningConfig(dingtalkCfg, { applyDefaults: true }));
